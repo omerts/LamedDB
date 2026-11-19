@@ -6,7 +6,7 @@ import type {
   PutOptions,
   RecordEnvelope,
 } from "../types.js";
-import { isPlainObject, parsePutOptions } from "../validate.js";
+import { isPlainObject, parseCollectionName, parsePutOptions } from "../validate.js";
 
 export interface LamedDBOptions {
   baseUrl: string;
@@ -89,7 +89,9 @@ async function createCollection(
 }
 
 async function deleteCollection(transport: Transport, name: string): Promise<void> {
-  await requestJson(transport, "DELETE", `/v1/collections/${encodeURIComponent(name)}`);
+  const collectionName = parseCollectionName(name);
+
+  await requestJson(transport, "DELETE", `/v1/collections/${encodeURIComponent(collectionName)}`);
 }
 
 async function putRecord(

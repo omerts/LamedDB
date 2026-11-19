@@ -7,6 +7,7 @@ import {
   listen,
   type MemoryStoreOptions,
   type RunningServer,
+  type Store,
 } from "../src/index.js";
 import { LIMITS, idempotencyRetentionFromEnv } from "../src/validate.js";
 
@@ -503,6 +504,105 @@ describe("deleting a collection drops its keys", () => {
     await expect(orders.put("ord_123", { status: "paid" }, { idempotencyKey: "kept" })).resolves.toEqual(
       created,
     );
+  });
+
+  it("rejects a non-string or empty name in the SDK before sending the request", async () => {
+    let calls = 0;
+    const db = new LamedDB({
+      baseUrl: "http://127.0.0.1:9",
+      fetch: async () => {
+        calls += 1;
+        throw new Error("delete should not be sent");
+      },
+    });
+
+    await expect(db.admin.deleteCollection(undefined as unknown as string)).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "Collection name must be a string.",
+    });
+    await expect(db.admin.deleteCollection(12 as unknown as string)).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "Collection name must be a string.",
+    });
+    await expect(db.admin.deleteCollection("")).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+    });
+    expect(calls).toBe(0);
+  });
+
+  it("does not store a document checked against a collection that was replaced", async () => {
+    const store = new MemoryStore();
+    let replaced = false;
+    const racing: Store = {
+      createCollection: (name, fields) => store.createCollection(name, fields),
+      getCollection: (name) => store.getCollection(name),
+      deleteCollection: (name) => store.deleteCollection(name),
+      getRecord: (collection, id) => store.getRecord(collection, id),
+      deleteRecord: (collection, id) => store.deleteRecord(collection, id),
+      async putRecord(input) {
+        if (input.collection === "orders" && !replaced) {
+          replaced = true;
+          await store.deleteCollection(input.collection);
+          await store.createCollection(input.collection, { status: "integer" });
+        }
+
+        return store.putRecord(input);
+      },
+    };
+    const service = new CollectionService(racing);
+
+    await service.createCollection("orders", { fields: { status: "string" } });
+    await service.createCollection("tickets", { fields: { status: "string" } });
+    await service.putRecord("tickets", "t_1", { status: "open" });
+
+    await expect(service.putRecord("orders", "ord_123", { status: "paid" })).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Collection "orders" was replaced before the write.',
+    });
+    await expect(service.getRecord("orders", "ord_123")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Record "ord_123" was not found in collection "orders".',
+    });
+    await expect(service.getRecord("tickets", "t_1")).resolves.toEqual({
+      id: "t_1",
+      version: 1,
+      data: { status: "open" },
+    });
+
+    const current = await store.getCollection("orders");
+
+    await expect(
+      store.putRecord({
+        collection: "orders",
+        id: "ord_123",
+        data: { status: "paid" },
+        createOnly: false,
+        collectionRevision: (current?.revision ?? 0) + 1,
+      }),
+    ).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Collection "orders" was replaced before the write.',
+    });
+    await expect(
+      store.putRecord({
+        collection: "orders",
+        id: "ord_123",
+        data: {},
+        createOnly: false,
+        collectionRevision: Number.NaN,
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "Collection revision must be a non-negative safe integer.",
+    });
+    await expect(store.getRecord("orders", "ord_123")).resolves.toBeNull();
   });
 });
 

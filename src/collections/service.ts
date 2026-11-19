@@ -1,5 +1,5 @@
 import { LamedError } from "../errors.js";
-import type { IdempotentPut, Store } from "../storage/store.js";
+import type { CollectionState, IdempotentPut, Store } from "../storage/store.js";
 import type { CollectionInfo, JsonObject, JsonValue, PutOptions, RecordEnvelope } from "../types.js";
 import {
   parseCollectionName,
@@ -56,6 +56,7 @@ export class CollectionService {
       id: recordId,
       data: document,
       createOnly: putOptions.createOnly,
+      collectionRevision: collection.revision,
       ifVersion: putOptions.ifVersion,
       idempotency,
     });
@@ -95,7 +96,7 @@ export class CollectionService {
     }
   }
 
-  private async requireCollection(name: string): Promise<CollectionInfo> {
+  private async requireCollection(name: string): Promise<CollectionState> {
     const collection = await this.store.getCollection(name);
 
     if (!collection) {
