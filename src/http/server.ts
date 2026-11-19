@@ -176,7 +176,19 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
     };
   }
 
-  return methodNotAllowed(["GET", "PUT"]);
+  if (method === "DELETE") {
+    rejectUnsupportedPreconditions(req);
+    rejectDeleteIfNoneMatch(req);
+
+    await service.deleteRecord(name, id);
+
+    return {
+      status: 204,
+      body: undefined,
+    };
+  }
+
+  return methodNotAllowed(["GET", "PUT", "DELETE"]);
 }
 
 function parseCreateCollectionBody(body: unknown): { name: string; fields: unknown } {
@@ -213,6 +225,12 @@ function rejectUnsupportedPreconditions(req: IncomingMessage): void {
 
   if (req.headers["idempotency-key"] !== undefined) {
     throw new LamedError("invalid_argument", "Idempotency-Key is not supported yet.");
+  }
+}
+
+function rejectDeleteIfNoneMatch(req: IncomingMessage): void {
+  if (req.headers["if-none-match"] !== undefined) {
+    throw new LamedError("invalid_argument", "If-None-Match is not supported yet.");
   }
 }
 
@@ -254,6 +272,19 @@ function writeJson(
 ): void {
   if (res.headersSent || res.writableEnded) {
     onFlushed?.();
+
+    return;
+  }
+
+  if (status === 204) {
+    res.writeHead(status, {
+      "cache-control": "no-store",
+      "content-length": "0",
+      ...headers,
+    });
+    res.end(() => {
+      onFlushed?.();
+    });
 
     return;
   }

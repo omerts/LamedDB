@@ -10,7 +10,7 @@ interface StoredRecord {
 
 /**
  * Process-local store. Suitable for the first API slice and for tests.
- * Record versions are a high-water mark per id so a future delete cannot reuse one.
+ * Deleting a record drops its version so the next put of that id starts at 1.
  */
 export class MemoryStore implements Store {
   private readonly collections = new Map<string, CollectionInfo>();
@@ -87,6 +87,23 @@ export class MemoryStore implements Store {
     }
 
     return cloneRecord(stored);
+  }
+
+  async deleteRecord(collection: string, id: string): Promise<boolean> {
+    if (!this.collections.has(collection)) {
+      throw new LamedError("not_found", `Collection "${collection}" does not exist.`);
+    }
+
+    const key = recordKey(collection, id);
+    const existed = this.records.delete(key);
+
+    if (!existed) {
+      return false;
+    }
+
+    this.versions.delete(key);
+
+    return true;
   }
 }
 

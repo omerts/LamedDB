@@ -34,7 +34,7 @@ The server listens on `http://127.0.0.1:8080`. Override the bind address with `H
 
 ## API
 
-Declared field types are `string`, `integer` (a JSON safe integer), and `timestamp` (a UTC instant with millisecond precision, such as `2026-11-19T08:15:00.000Z`). Null is a stored value. Fields that are not declared are stored as JSON. `put` replaces the whole document. The first write of an id is version `1`, and each successful replace adds 1.
+Declared field types are `string`, `integer` (a JSON safe integer), and `timestamp` (a UTC instant with millisecond precision, such as `2026-11-19T08:15:00.000Z`). Null is a stored value. Fields that are not declared are stored as JSON. `put` replaces the whole document. The first write of an id is version `1`, and each successful replace adds 1. `delete` removes the record. A later put of that id starts again at version `1`.
 
 `createOnly` is sent as `If-None-Match: *`. If the record already exists, the response is `412` and the stored record is unchanged.
 
@@ -60,6 +60,7 @@ await orders.put(
 );
 
 const order = await orders.get("ord_123");
+await orders.delete("ord_123");
 ```
 
 ```bash
@@ -73,6 +74,8 @@ curl -sS -X PUT http://127.0.0.1:8080/v1/collections/orders/records/ord_123 \
   -d '{"status":"paid","totalCents":12900,"createdAt":"2026-11-19T08:15:00.000Z"}'
 
 curl -sS http://127.0.0.1:8080/v1/collections/orders/records/ord_123
+
+curl -sS -D - -o /dev/null -X DELETE http://127.0.0.1:8080/v1/collections/orders/records/ord_123
 ```
 
 | SDK | HTTP | Result |
@@ -80,9 +83,10 @@ curl -sS http://127.0.0.1:8080/v1/collections/orders/records/ord_123
 | `admin.createCollection(name, spec?)` | `POST /v1/collections` | `201` and `{ name, fields }` |
 | `collection.put(id, data, options?)` | `PUT /v1/collections/{name}/records/{id}` | `201` on create, `200` on replace, body `{ id, version, data }` |
 | `collection.get(id)` | `GET /v1/collections/{name}/records/{id}` | `200` and the record, or `404` |
+| `collection.delete(id)` | `DELETE /v1/collections/{name}/records/{id}` | `204` with no body, or `404` |
 
 Errors are JSON: `{ "error": { "code", "message", "details?" } }`. Codes include `invalid_argument` (400), `not_found` (404), `already_exists` (409), and `precondition_failed` (412).
 
 ## Not in this slice
 
-Delete, `If-Match` / `ifVersion`, idempotency keys, event emit, tenancy and credentials, queries, and a durable store are follow-ups. Sending `If-Match` or `Idempotency-Key` is rejected so those preconditions are not silently ignored.
+`If-Match` / `ifVersion`, idempotency keys, event emit, tenancy and credentials, queries, and a durable store are follow-ups. Sending `If-Match` or `Idempotency-Key` on create or put is rejected. Sending `If-Match`, `If-None-Match`, or `Idempotency-Key` on delete is rejected. Those preconditions are not silently ignored.

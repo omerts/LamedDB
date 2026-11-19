@@ -64,6 +64,22 @@ export class CollectionService {
     return record;
   }
 
+  async deleteRecord(name: string, id: string): Promise<void> {
+    const collectionName = parseCollectionName(name);
+    const recordId = parseRecordId(id);
+
+    await this.requireCollection(collectionName);
+
+    const deleted = await this.store.deleteRecord(collectionName, recordId);
+
+    if (!deleted) {
+      throw new LamedError(
+        "not_found",
+        `Record "${recordId}" was not found in collection "${collectionName}".`,
+      );
+    }
+  }
+
   private async requireCollection(name: string): Promise<CollectionInfo> {
     const collection = await this.store.getCollection(name);
 
