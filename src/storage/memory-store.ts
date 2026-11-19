@@ -1,6 +1,13 @@
 import { LamedError } from "../errors.js";
 import type { CollectionInfo, FieldMap, FieldType, JsonObject, RecordEnvelope } from "../types.js";
-import type { PutRecordInput, PutRecordResult, Store } from "./store.js";
+import { parseMemoryStoreOptions } from "../validate.js";
+import type {
+  CollectionState,
+  IdempotentPut,
+  PutRecordInput,
+  PutRecordResult,
+  Store,
+} from "./store.js";
 
 interface StoredRecord {
   id: string;
@@ -12,45 +19,101 @@ interface IdempotencyEntry {
   fingerprint: string;
   created: boolean;
   record: StoredRecord;
+  storedAt: number;
+}
+
+export interface MemoryStoreOptions {
+  /** Millisecond clock. Tests inject one so expiry does not wait on wall time. */
+  now?: () => number;
+  /** How long a stored key stays replayable. Defaults to 24 hours. */
+  idempotencyTtlMs?: number;
+  /** How many keys one collection keeps. The oldest is dropped past this. */
+  maxIdempotencyKeys?: number;
+}
+
+interface StoredCollection {
+  name: string;
+  fields: FieldMap;
+  revision: number;
 }
 
 /**
  * Process-local store. Suitable for the first API slice and for tests.
  * Deleting a record keeps its version counter so the next put of that id continues at last + 1.
  * Idempotency keys are kept per collection and survive that delete.
+ * They expire after a TTL, and each collection keeps at most a fixed number of them.
+ * Deleting the collection drops its keys, records, and version counters.
  */
 export class MemoryStore implements Store {
-  private readonly collections = new Map<string, CollectionInfo>();
+  private readonly collections = new Map<string, StoredCollection>();
 
-  private readonly records = new Map<string, StoredRecord>();
+  private readonly records = new Map<string, Map<string, StoredRecord>>();
 
-  private readonly versions = new Map<string, number>();
+  private readonly versions = new Map<string, Map<string, number>>();
 
-  private readonly idempotency = new Map<string, IdempotencyEntry>();
+  private readonly idempotency = new Map<string, Map<string, IdempotencyEntry>>();
+
+  /** Highest storedAt in each collection. Keeps expiry a prefix without scanning. */
+  private readonly idempotencyNewestAt = new Map<string, number>();
+
+  private nextRevision = 1;
+
+  private readonly now: () => number;
+
+  private readonly idempotencyTtlMs: number;
+
+  private readonly maxIdempotencyKeys: number;
+
+  constructor(options: MemoryStoreOptions = {}) {
+    const retention = parseMemoryStoreOptions(options);
+
+    this.now = retention.now;
+    this.idempotencyTtlMs = retention.idempotencyTtlMs;
+    this.maxIdempotencyKeys = retention.maxIdempotencyKeys;
+  }
 
   async createCollection(name: string, fields: FieldMap): Promise<CollectionInfo> {
     if (this.collections.has(name)) {
       throw new LamedError("already_exists", `Collection "${name}" already exists.`);
     }
 
-    const collection: CollectionInfo = {
+    const collection: StoredCollection = {
       name,
       fields: cloneFields(fields),
+      revision: this.nextRevision,
     };
 
+    this.nextRevision += 1;
     this.collections.set(name, collection);
 
     return cloneCollection(collection);
   }
 
-  async getCollection(name: string): Promise<CollectionInfo | null> {
+  async getCollection(name: string): Promise<CollectionState | null> {
     const collection = this.collections.get(name);
 
     if (!collection) {
       return null;
     }
 
-    return cloneCollection(collection);
+    return {
+      name: collection.name,
+      fields: cloneFields(collection.fields),
+      revision: collection.revision,
+    };
+  }
+
+  async deleteCollection(name: string): Promise<boolean> {
+    if (!this.collections.delete(name)) {
+      return false;
+    }
+
+    this.idempotency.delete(name);
+    this.idempotencyNewestAt.delete(name);
+    this.records.delete(name);
+    this.versions.delete(name);
+
+    return true;
   }
 
   async putRecord(input: PutRecordInput): Promise<PutRecordResult> {
@@ -64,7 +127,7 @@ export class MemoryStore implements Store {
       return null;
     }
 
-    const stored = this.records.get(recordKey(collection, id));
+    const stored = this.records.get(collection)?.get(id);
 
     if (!stored) {
       return null;
@@ -78,15 +141,31 @@ export class MemoryStore implements Store {
    * record update would let two puts with the same key both write.
    */
   private applyPut(input: PutRecordInput): PutRecordResult {
-    if (!this.collections.has(input.collection)) {
+    const collection = this.collections.get(input.collection);
+
+    if (!collection) {
       throw new LamedError("not_found", `Collection "${input.collection}" does not exist.`);
     }
 
+    if (!Number.isSafeInteger(input.collectionRevision) || input.collectionRevision < 0) {
+      throw new LamedError("invalid_argument", "Collection revision must be a non-negative safe integer.");
+    }
+
+    if (collection.revision !== input.collectionRevision) {
+      throw new LamedError(
+        "not_found",
+        `Collection "${input.collection}" was replaced before the write.`,
+      );
+    }
+
+    // One clock reading covers the expiry decision and the timestamp stored
+    // after a successful write. Nothing between them awaits.
     const idempotency = input.idempotency;
-    const idempotencyKey = idempotency
-      ? idempotencyStorageKey(input.collection, idempotency.key)
-      : undefined;
-    const recorded = idempotencyKey === undefined ? undefined : this.idempotency.get(idempotencyKey);
+    const now = idempotency === undefined ? undefined : this.readNow();
+    const recorded =
+      idempotency === undefined || now === undefined
+        ? undefined
+        : this.liveEntry(input.collection, idempotency.key, now);
 
     if (idempotency && recorded) {
       if (recorded.fingerprint !== idempotency.fingerprint) {
@@ -103,8 +182,9 @@ export class MemoryStore implements Store {
       };
     }
 
-    const key = recordKey(input.collection, input.id);
-    const existing = this.records.get(key);
+    const records = this.bucket(this.records, input.collection);
+    const versions = this.bucket(this.versions, input.collection);
+    const existing = records.get(input.id);
 
     // The compare and the two map writes below stay synchronous. An await
     // between them would let a second If-Match on the same version succeed.
@@ -133,22 +213,20 @@ export class MemoryStore implements Store {
       );
     }
 
-    const version = (this.versions.get(key) ?? 0) + 1;
+    const version = (versions.get(input.id) ?? 0) + 1;
     const stored: StoredRecord = {
       id: input.id,
       version,
       data: structuredClone(input.data),
     };
 
-    this.versions.set(key, version);
-    this.records.set(key, stored);
+    versions.set(input.id, version);
+    records.set(input.id, stored);
 
-    if (idempotency && idempotencyKey !== undefined) {
-      this.idempotency.set(idempotencyKey, {
-        fingerprint: idempotency.fingerprint,
-        created: existing === undefined,
-        record: snapshotRecord(stored),
-      });
+    // The map changes only after the write. A 412 leaves live keys in place,
+    // and a failed attempt is not recorded.
+    if (idempotency !== undefined && now !== undefined) {
+      this.remember(input.collection, idempotency, existing === undefined, stored, now);
     }
 
     return {
@@ -162,21 +240,123 @@ export class MemoryStore implements Store {
       throw new LamedError("not_found", `Collection "${collection}" does not exist.`);
     }
 
-    const key = recordKey(collection, id);
-
     // Leave the version counter in place. The next put continues at last + 1,
     // so an ETag from before this delete cannot match the recreated record.
 
-    return this.records.delete(key);
+    return this.records.get(collection)?.delete(id) ?? false;
+  }
+
+  private bucket<T>(map: Map<string, Map<string, T>>, collection: string): Map<string, T> {
+    let inner = map.get(collection);
+
+    if (inner === undefined) {
+      inner = new Map();
+      map.set(collection, inner);
+    }
+
+    return inner;
+  }
+
+  private storedAtFor(collection: string, now: number): number {
+    const newest = this.idempotencyNewestAt.get(collection);
+
+    // A backwards clock would record this key with an earlier timestamp than a key
+    // already in the map. That later key could then expire while the earlier one
+    // is still live, and stopping at the first live key would leave it behind.
+    // Pin it to the newest stored time so now < storedAt keeps the current keys
+    // live together and the next expiry is still a prefix.
+    if (newest !== undefined && now < newest) {
+      return newest;
+    }
+
+    return now;
+  }
+
+  private readNow(): number {
+    const now = this.now();
+
+    if (typeof now !== "number" || !Number.isSafeInteger(now) || now < 0) {
+      throw new LamedError(
+        "internal",
+        "Clock must return a non-negative safe integer timestamp in milliseconds.",
+      );
+    }
+
+    return now;
+  }
+
+  private liveEntry(collection: string, key: string, now: number): IdempotencyEntry | undefined {
+    const recorded = this.idempotency.get(collection)?.get(key);
+
+    if (recorded === undefined || isExpired(recorded.storedAt, now, this.idempotencyTtlMs)) {
+      return undefined;
+    }
+
+    return recorded;
+  }
+
+  private remember(
+    collection: string,
+    idempotency: IdempotentPut,
+    created: boolean,
+    record: StoredRecord,
+    now: number,
+  ): void {
+    let keys = this.idempotency.get(collection);
+
+    if (keys === undefined) {
+      keys = new Map();
+      this.idempotency.set(collection, keys);
+    }
+
+    // Stored times do not decrease, so expired keys are a prefix. Stop at the first live one.
+    for (const [key, entry] of keys) {
+      if (!isExpired(entry.storedAt, now, this.idempotencyTtlMs)) {
+        break;
+      }
+
+      keys.delete(key);
+    }
+
+    if (keys.size === 0) {
+      this.idempotencyNewestAt.delete(collection);
+    }
+
+    // Delete first so a reused key is stored as the newest, not left in its old position.
+    keys.delete(idempotency.key);
+
+    if (keys.size === 0) {
+      this.idempotencyNewestAt.delete(collection);
+    }
+
+    const storedAt = this.storedAtFor(collection, now);
+
+    keys.set(idempotency.key, {
+      fingerprint: idempotency.fingerprint,
+      created,
+      record: snapshotRecord(record),
+      storedAt,
+    });
+    this.idempotencyNewestAt.set(collection, storedAt);
+
+    while (keys.size > this.maxIdempotencyKeys) {
+      const oldest = keys.keys().next().value;
+
+      if (oldest === undefined) {
+        break;
+      }
+
+      keys.delete(oldest);
+    }
   }
 }
 
-function recordKey(collection: string, id: string): string {
-  return `${collection}\0${id}`;
-}
+function isExpired(storedAt: number, now: number, ttlMs: number): boolean {
+  if (now < storedAt) {
+    return false;
+  }
 
-function idempotencyStorageKey(collection: string, key: string): string {
-  return `${collection}\0idempotency\0${key}`;
+  return now - storedAt >= ttlMs;
 }
 
 function snapshotRecord(record: StoredRecord): StoredRecord {

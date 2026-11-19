@@ -9,6 +9,10 @@ export const LIMITS = {
   maxObjectKeys: 256,
   maxArrayItems: 1_024,
   maxIdempotencyKeyLength: 255,
+  /** Default lifetime of a stored idempotency key. 24 hours. */
+  idempotencyTtlMs: 86_400_000,
+  /** Default maximum of live keys kept for one collection. */
+  maxIdempotencyKeysPerCollection: 10_000,
 } as const;
 
 const COLLECTION_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,62}$/;
@@ -118,6 +122,115 @@ export function parsePutOptions(options: unknown): {
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     ...(ifVersion !== undefined ? { ifVersion } : {}),
   };
+}
+
+const STORE_OPTIONS = new Set(["now", "idempotencyTtlMs", "maxIdempotencyKeys"]);
+
+export interface MemoryStoreRetention {
+  now: () => number;
+  idempotencyTtlMs: number;
+  maxIdempotencyKeys: number;
+}
+
+/**
+ * Runtime check for MemoryStore options. Unknown options are rejected, not ignored.
+ * Omitted retention settings use the defaults in `LIMITS`.
+ */
+export function parseMemoryStoreOptions(options: unknown): MemoryStoreRetention {
+  if (options === undefined) {
+    return defaultRetention(Date.now);
+  }
+
+  if (!isPlainObject(options)) {
+    throw new LamedError("invalid_argument", "MemoryStore options must be an object.");
+  }
+
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== "string" || !STORE_OPTIONS.has(key)) {
+      throw new LamedError("invalid_argument", `Unknown store option "${optionKeyName(key)}".`);
+    }
+  }
+
+  const now = options.now;
+
+  if (now !== undefined && typeof now !== "function") {
+    throw new LamedError("invalid_argument", "Clock must be a function.", { parameter: "now" });
+  }
+
+  return {
+    now: typeof now === "function" ? (now as () => number) : Date.now,
+    idempotencyTtlMs: parsePositiveInteger(
+      options.idempotencyTtlMs,
+      "idempotencyTtlMs",
+      LIMITS.idempotencyTtlMs,
+    ),
+    maxIdempotencyKeys: parsePositiveInteger(
+      options.maxIdempotencyKeys,
+      "maxIdempotencyKeys",
+      LIMITS.maxIdempotencyKeysPerCollection,
+    ),
+  };
+}
+
+/** Read the server's idempotency TTL and cap. Empty values use the defaults. */
+export function idempotencyRetentionFromEnv(env: {
+  IDEMPOTENCY_TTL_MS?: unknown;
+  IDEMPOTENCY_MAX_KEYS?: unknown;
+}): Pick<MemoryStoreRetention, "idempotencyTtlMs" | "maxIdempotencyKeys"> {
+  if (env === null || typeof env !== "object") {
+    throw new LamedError("invalid_argument", "Environment must be an object.");
+  }
+
+  return {
+    idempotencyTtlMs: parsePositiveInteger(
+      env.IDEMPOTENCY_TTL_MS,
+      "IDEMPOTENCY_TTL_MS",
+      LIMITS.idempotencyTtlMs,
+    ),
+    maxIdempotencyKeys: parsePositiveInteger(
+      env.IDEMPOTENCY_MAX_KEYS,
+      "IDEMPOTENCY_MAX_KEYS",
+      LIMITS.maxIdempotencyKeysPerCollection,
+    ),
+  };
+}
+
+function defaultRetention(now: () => number): MemoryStoreRetention {
+  return {
+    now,
+    idempotencyTtlMs: LIMITS.idempotencyTtlMs,
+    maxIdempotencyKeys: LIMITS.maxIdempotencyKeysPerCollection,
+  };
+}
+
+function parsePositiveInteger(value: unknown, label: string, fallback: number): number {
+  if (value === undefined || value === "") {
+    return fallback;
+  }
+
+  const parsed = typeof value === "string" ? strictInteger(value) : value;
+
+  if (typeof parsed !== "number" || !Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new LamedError("invalid_argument", `${label} must be a positive integer.`, {
+      parameter: label,
+    });
+  }
+
+  return parsed;
+}
+
+function strictInteger(value: string): number | undefined {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isSafeInteger(parsed) || String(parsed) !== value) {
+    return undefined;
+  }
+
+  return parsed;
 }
 
 function parseIfVersion(value: unknown): number | undefined {

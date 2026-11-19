@@ -1,5 +1,5 @@
 import { LamedError } from "../errors.js";
-import type { IdempotentPut, Store } from "../storage/store.js";
+import type { CollectionState, IdempotentPut, Store } from "../storage/store.js";
 import type { CollectionInfo, JsonObject, JsonValue, PutOptions, RecordEnvelope } from "../types.js";
 import {
   parseCollectionName,
@@ -28,6 +28,15 @@ export class CollectionService {
     return this.store.createCollection(collectionName, fields);
   }
 
+  async deleteCollection(name: string): Promise<void> {
+    const collectionName = parseCollectionName(name);
+    const deleted = await this.store.deleteCollection(collectionName);
+
+    if (!deleted) {
+      throw new LamedError("not_found", `Collection "${collectionName}" does not exist.`);
+    }
+  }
+
   async putRecord(
     name: string,
     id: string,
@@ -47,6 +56,7 @@ export class CollectionService {
       id: recordId,
       data: document,
       createOnly: putOptions.createOnly,
+      collectionRevision: collection.revision,
       ifVersion: putOptions.ifVersion,
       idempotency,
     });
@@ -86,7 +96,7 @@ export class CollectionService {
     }
   }
 
-  private async requireCollection(name: string): Promise<CollectionInfo> {
+  private async requireCollection(name: string): Promise<CollectionState> {
     const collection = await this.store.getCollection(name);
 
     if (!collection) {
