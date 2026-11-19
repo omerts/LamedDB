@@ -3,6 +3,14 @@ import type { IncomingMessage } from "node:http";
 import { LamedError } from "../errors.js";
 import { LIMITS } from "../validate.js";
 
+/** Body exceeded the limit. The response must be written before the socket is destroyed. */
+export class OversizedBodyError extends LamedError {
+  constructor() {
+    super("invalid_argument", "Request body exceeds 1 MiB.");
+    this.name = "OversizedBodyError";
+  }
+}
+
 export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   assertJsonContentType(req.headers["content-type"]);
 
@@ -51,8 +59,10 @@ function readLimited(req: IncomingMessage): Promise<Buffer> {
       total += buffer.length;
 
       if (total > LIMITS.maxBodyBytes) {
-        fail(new LamedError("invalid_argument", "Request body exceeds 1 MiB."));
-        req.destroy();
+        // Stop reading so the remainder is never copied, but leave the socket
+        // open until the caller has written the 400 response.
+        req.pause();
+        fail(new OversizedBodyError());
 
         return;
       }

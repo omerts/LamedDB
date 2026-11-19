@@ -16,7 +16,13 @@ const FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const FIELD_TYPES: readonly FieldType[] = ["string", "integer", "timestamp"];
 
-export function parseCollectionName(name: string): string {
+export function parseCollectionName(name: unknown): string {
+  if (typeof name !== "string") {
+    throw new LamedError("invalid_argument", "Collection name must be a string.", {
+      parameter: "name",
+    });
+  }
+
   if (COLLECTION_NAME.test(name)) {
     return name;
   }
@@ -27,7 +33,13 @@ export function parseCollectionName(name: string): string {
   );
 }
 
-export function parseRecordId(id: string): string {
+export function parseRecordId(id: unknown): string {
+  if (typeof id !== "string") {
+    throw new LamedError("invalid_argument", "Record id must be a string.", {
+      parameter: "id",
+    });
+  }
+
   if (RECORD_ID.test(id)) {
     return id;
   }

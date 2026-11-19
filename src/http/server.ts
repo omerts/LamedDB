@@ -5,7 +5,7 @@ import { LamedError } from "../errors.js";
 import { MemoryStore } from "../storage/memory-store.js";
 import type { Store } from "../storage/store.js";
 import { isPlainObject } from "../validate.js";
-import { readJsonBody } from "./body.js";
+import { OversizedBodyError, readJsonBody } from "./body.js";
 
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
 
@@ -86,7 +86,17 @@ async function handleRequest(
     writeJson(res, result.status, result.body, result.headers);
   } catch (error) {
     if (error instanceof LamedError) {
-      writeJson(res, error.status, error.toJSON());
+      const headers: Record<string, string> = {};
+
+      if (error instanceof OversizedBodyError) {
+        headers.connection = "close";
+      }
+
+      writeJson(res, error.status, error.toJSON(), headers, () => {
+        if (error instanceof OversizedBodyError && !req.destroyed) {
+          req.destroy();
+        }
+      });
 
       return;
     }
@@ -106,6 +116,8 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
     if (method !== "POST") {
       return methodNotAllowed(["POST"]);
     }
+
+    rejectUnsupportedPreconditions(req);
 
     const body = parseCreateCollectionBody(await readJsonBody(req));
     const collection = await service.createCollection(body.name, { fields: body.fields });
@@ -136,7 +148,9 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
   const id = decodePathSegment(idSegment);
 
   if (method === "PUT") {
-    // createOnly is If-None-Match: *. A failed precondition is 412, per the API proposal.
+    rejectUnsupportedPreconditions(req);
+
+    // createOnly is the bare If-None-Match: *. A failed precondition is 412.
     const createOnly = readCreateOnly(req);
     const outcome = await service.putRecord(name, id, await readJsonBody(req), { createOnly });
 
@@ -189,7 +203,7 @@ function parseCreateCollectionBody(body: unknown): { name: string; fields: unkno
   };
 }
 
-function readCreateOnly(req: IncomingMessage): boolean {
+function rejectUnsupportedPreconditions(req: IncomingMessage): void {
   if (req.headers["if-match"] !== undefined) {
     throw new LamedError(
       "invalid_argument",
@@ -200,7 +214,9 @@ function readCreateOnly(req: IncomingMessage): boolean {
   if (req.headers["idempotency-key"] !== undefined) {
     throw new LamedError("invalid_argument", "Idempotency-Key is not supported yet.");
   }
+}
 
+function readCreateOnly(req: IncomingMessage): boolean {
   const header = req.headers["if-none-match"];
 
   if (header === undefined) {
@@ -209,7 +225,8 @@ function readCreateOnly(req: IncomingMessage): boolean {
 
   const value = (Array.isArray(header) ? header.join(", ") : header).trim();
 
-  if (value === "*" || value === '"*"') {
+  // Only the bare wildcard is createOnly. A quoted "*" is an entity tag.
+  if (value === "*") {
     return true;
   }
 
@@ -233,8 +250,11 @@ function writeJson(
   status: number,
   body: unknown,
   headers: Record<string, string> = {},
+  onFlushed?: () => void,
 ): void {
   if (res.headersSent || res.writableEnded) {
+    onFlushed?.();
+
     return;
   }
 
@@ -246,7 +266,9 @@ function writeJson(
     "content-length": Buffer.byteLength(payload),
     ...headers,
   });
-  res.end(payload);
+  res.end(payload, () => {
+    onFlushed?.();
+  });
 }
 
 function decodePathSegment(segment: string): string {

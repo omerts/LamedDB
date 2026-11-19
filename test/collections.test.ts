@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { LamedDB, LamedError, listen, type RunningServer } from "../src/index.js";
+import { LIMITS, parseCollectionName, parseRecordId } from "../src/validate.js";
 
 const paidAt = "2026-11-19T08:15:00.000Z";
 
@@ -284,5 +285,134 @@ describe("collections API", () => {
     await expect(missing.json()).resolves.toMatchObject({
       error: { code: "not_found" },
     });
+  });
+
+  it("returns a JSON 400 when the body exceeds 1 MiB", async () => {
+    const response = await fetch(`${running?.url}/v1/collections`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "orders", note: "x".repeat(LIMITS.maxBodyBytes) }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "Request body exceeds 1 MiB.",
+      },
+    });
+
+    const created = await fetch(`${running?.url}/v1/collections`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "orders" }),
+    });
+
+    expect(created.status).toBe(201);
+  });
+
+  it("rejects Idempotency-Key and If-Match on collection create before writing", async () => {
+    const idempotent = await fetch(`${running?.url}/v1/collections`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "create-orders",
+      },
+      body: JSON.stringify({ name: "orders" }),
+    });
+
+    expect(idempotent.status).toBe(400);
+    await expect(idempotent.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "Idempotency-Key is not supported yet.",
+      },
+    });
+
+    const conditional = await fetch(`${running?.url}/v1/collections`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "if-match": '"1"',
+      },
+      body: JSON.stringify({ name: "orders" }),
+    });
+
+    expect(conditional.status).toBe(400);
+    await expect(conditional.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "If-Match is not supported yet. Conditional replaces are a follow-up.",
+      },
+    });
+
+    const created = await fetch(`${running?.url}/v1/collections`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "orders" }),
+    });
+
+    expect(created.status).toBe(201);
+  });
+
+  it("treats only a bare If-None-Match star as createOnly", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+    await db.collection("orders").put("ord_123", { status: "open" });
+
+    const quoted = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "if-none-match": '"*"',
+      },
+      body: JSON.stringify({ status: "paid" }),
+    });
+
+    expect(quoted.status).toBe(400);
+    await expect(quoted.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: 'If-None-Match only supports "*" in this version.',
+      },
+    });
+
+    const bare = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "if-none-match": "*",
+      },
+      body: JSON.stringify({ status: "paid" }),
+    });
+
+    expect(bare.status).toBe(412);
+    await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 1,
+      data: { status: "open" },
+    });
+  });
+});
+
+describe("parseCollectionName and parseRecordId", () => {
+  it("rejects non-string values instead of coercing them into identifiers", () => {
+    expect(() => parseCollectionName(123)).toThrow(
+      expect.objectContaining({
+        code: "invalid_argument",
+        status: 400,
+        message: "Collection name must be a string.",
+        details: { parameter: "name" },
+      }),
+    );
+    expect(() => parseRecordId(123)).toThrow(
+      expect.objectContaining({
+        code: "invalid_argument",
+        status: 400,
+        message: "Record id must be a string.",
+        details: { parameter: "id" },
+      }),
+    );
+    expect(parseCollectionName("orders")).toBe("orders");
+    expect(parseRecordId("123")).toBe("123");
   });
 });
