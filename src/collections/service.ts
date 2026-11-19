@@ -28,6 +28,15 @@ export class CollectionService {
     return this.store.createCollection(collectionName, fields);
   }
 
+  async deleteCollection(name: string): Promise<void> {
+    const collectionName = parseCollectionName(name);
+    const deleted = await this.store.deleteCollection(collectionName);
+
+    if (!deleted) {
+      throw new LamedError("not_found", `Collection "${collectionName}" does not exist.`);
+    }
+  }
+
   async putRecord(
     name: string,
     id: string,

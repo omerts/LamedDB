@@ -1,8 +1,12 @@
 import { listen } from "./http/server.js";
+import { MemoryStore } from "./storage/memory-store.js";
+import { idempotencyRetentionFromEnv } from "./validate.js";
 
 const port = readPort(process.env.PORT);
 const host = process.env.HOST ?? "127.0.0.1";
-const running = await listen({ port, host });
+const retention = idempotencyRetentionFromEnv(process.env);
+
+const running = await listen({ port, host, store: new MemoryStore(retention) });
 
 console.log(`LamedDB listening on ${running.url}`);
 

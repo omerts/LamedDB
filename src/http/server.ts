@@ -8,6 +8,7 @@ import { isPlainObject, parseIdempotencyKey } from "../validate.js";
 import { OversizedBodyError, readJsonBody, readLimitedBody } from "./body.js";
 
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
+const COLLECTION_PATH = /^\/v1\/collections\/([^/]+)$/;
 
 export interface ListenOptions {
   port?: number;
@@ -136,6 +137,33 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
       headers: {
         location: `/v1/collections/${encodeURIComponent(collection.name)}`,
       },
+    };
+  }
+
+  const collectionMatch = COLLECTION_PATH.exec(path);
+
+  if (collectionMatch) {
+    rejectUnexpectedQuery(url);
+    rejectIfMatch(req);
+    rejectIdempotencyKey(req);
+    rejectIfNoneMatch(req, "If-None-Match is not supported yet.");
+
+    if (method !== "DELETE") {
+      return methodNotAllowed(["DELETE"]);
+    }
+
+    const segment = collectionMatch[1];
+
+    if (segment === undefined) {
+      throw new LamedError("not_found", `No route for ${method} ${path}.`);
+    }
+
+    await rejectUnexpectedBody(req, "Delete");
+    await service.deleteCollection(decodePathSegment(segment));
+
+    return {
+      status: 204,
+      body: undefined,
     };
   }
 

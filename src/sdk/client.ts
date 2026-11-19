@@ -21,6 +21,7 @@ interface Transport {
 export class LamedDB {
   readonly admin: {
     createCollection(name: string, spec?: CollectionSpec): Promise<CollectionInfo>;
+    deleteCollection(name: string): Promise<void>;
   };
 
   private readonly transport: Transport;
@@ -36,6 +37,7 @@ export class LamedDB {
     };
     this.admin = {
       createCollection: (name, spec) => createCollection(this.transport, name, spec),
+      deleteCollection: (name) => deleteCollection(this.transport, name),
     };
   }
 
@@ -84,6 +86,10 @@ async function createCollection(
     name: parsed.name,
     fields: parsed.fields as CollectionInfo["fields"],
   };
+}
+
+async function deleteCollection(transport: Transport, name: string): Promise<void> {
+  await requestJson(transport, "DELETE", `/v1/collections/${encodeURIComponent(name)}`);
 }
 
 async function putRecord(
