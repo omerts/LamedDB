@@ -117,6 +117,7 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
       return methodNotAllowed(["POST"]);
     }
 
+    rejectUnexpectedQuery(url);
     rejectUnsupportedPreconditions(req);
 
     const body = parseCreateCollectionBody(await readJsonBody(req));
@@ -148,11 +149,17 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
   const id = decodePathSegment(idSegment);
 
   if (method === "PUT") {
-    rejectUnsupportedPreconditions(req);
+    rejectUnexpectedQuery(url);
+    rejectIdempotencyKey(req);
+    rejectCombinedMatchHeaders(req);
 
-    // createOnly is the bare If-None-Match: *. A failed precondition is 412.
+    // createOnly is the bare If-None-Match: *. ifVersion is If-Match: "<version>".
     const createOnly = readCreateOnly(req);
-    const outcome = await service.putRecord(name, id, await readJsonBody(req), { createOnly });
+    const ifVersion = readIfMatch(req);
+    const outcome = await service.putRecord(name, id, await readJsonBody(req), {
+      createOnly,
+      ifVersion,
+    });
 
     return {
       status: outcome.created ? 201 : 200,
@@ -165,6 +172,12 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
   }
 
   if (method === "GET") {
+    rejectUnexpectedQuery(url);
+    rejectUnsupportedPreconditions(req);
+    rejectIfNoneMatchHeader(req);
+
+    await rejectUnexpectedBody(req, "GET");
+
     const record = await service.getRecord(name, id);
 
     return {
@@ -177,11 +190,11 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
   }
 
   if (method === "DELETE") {
+    rejectUnexpectedQuery(url);
     rejectUnsupportedPreconditions(req);
     rejectDeleteIfNoneMatch(req);
-    rejectDeleteQuery(url);
 
-    await rejectDeleteBody(req);
+    await rejectUnexpectedBody(req, "Delete");
 
     await service.deleteRecord(name, id);
 
@@ -226,8 +239,24 @@ function rejectUnsupportedPreconditions(req: IncomingMessage): void {
     );
   }
 
+  rejectIdempotencyKey(req);
+}
+
+function rejectIdempotencyKey(req: IncomingMessage): void {
   if (req.headers["idempotency-key"] !== undefined) {
     throw new LamedError("invalid_argument", "Idempotency-Key is not supported yet.");
+  }
+}
+
+function rejectCombinedMatchHeaders(req: IncomingMessage): void {
+  if (req.headers["if-match"] !== undefined && req.headers["if-none-match"] !== undefined) {
+    throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
+  }
+}
+
+function rejectIfNoneMatchHeader(req: IncomingMessage): void {
+  if (req.headers["if-none-match"] !== undefined) {
+    throw new LamedError("invalid_argument", "If-None-Match is not supported on this request.");
   }
 }
 
@@ -237,7 +266,7 @@ function rejectDeleteIfNoneMatch(req: IncomingMessage): void {
   }
 }
 
-function rejectDeleteQuery(url: URL): void {
+function rejectUnexpectedQuery(url: URL): void {
   const name = url.searchParams.keys().next();
 
   if (name.done) {
@@ -246,18 +275,46 @@ function rejectDeleteQuery(url: URL): void {
 
   throw new LamedError(
     "invalid_argument",
-    `Unknown query parameter "${previewKey(name.value)}". Delete does not support query parameters.`,
+    `Unknown query parameter "${previewKey(name.value)}".`,
   );
 }
 
-async function rejectDeleteBody(req: IncomingMessage): Promise<void> {
+async function rejectUnexpectedBody(req: IncomingMessage, method: string): Promise<void> {
   const body = await readLimitedBody(req);
 
   if (body.length === 0) {
     return;
   }
 
-  throw new LamedError("invalid_argument", "Delete does not accept a request body.");
+  throw new LamedError("invalid_argument", `${method} does not accept a request body.`);
+}
+
+function readIfMatch(req: IncomingMessage): number | undefined {
+  const header = req.headers["if-match"];
+
+  if (header === undefined) {
+    return undefined;
+  }
+
+  const value = (Array.isArray(header) ? header.join(", ") : header).trim();
+
+  if (value.includes(",")) {
+    throw new LamedError("invalid_argument", "If-Match must be a single quoted version.");
+  }
+
+  const match = /^"(0|[1-9][0-9]*)"$/.exec(value);
+
+  if (!match || match[1] === undefined) {
+    throw new LamedError("invalid_argument", 'If-Match must be a quoted version, such as "1".');
+  }
+
+  const version = Number(match[1]);
+
+  if (!Number.isSafeInteger(version)) {
+    throw new LamedError("invalid_argument", 'If-Match must be a quoted version, such as "1".');
+  }
+
+  return version;
 }
 
 function readCreateOnly(req: IncomingMessage): boolean {

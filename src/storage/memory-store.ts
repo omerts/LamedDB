@@ -52,7 +52,27 @@ export class MemoryStore implements Store {
     const key = recordKey(input.collection, input.id);
     const existing = this.records.get(key);
 
-    if (existing && input.createOnly) {
+    // The compare and the two map writes below stay synchronous. An await
+    // between them would let a second If-Match on the same version succeed.
+    if (input.ifVersion !== undefined && input.createOnly) {
+      throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
+    }
+
+    if (input.ifVersion !== undefined) {
+      if (existing === undefined) {
+        throw new LamedError(
+          "precondition_failed",
+          `Record "${input.id}" was not found in collection "${input.collection}".`,
+        );
+      }
+
+      if (existing.version !== input.ifVersion) {
+        throw new LamedError(
+          "precondition_failed",
+          `Record "${input.id}" in collection "${input.collection}" is version ${existing.version}, not ${input.ifVersion}.`,
+        );
+      }
+    } else if (existing && input.createOnly) {
       throw new LamedError(
         "precondition_failed",
         `Record "${input.id}" already exists in collection "${input.collection}".`,

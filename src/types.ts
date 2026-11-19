@@ -30,4 +30,11 @@ export interface PutOptions {
    * On the wire this is `If-None-Match: *`.
    */
   createOnly?: boolean;
+
+  /**
+   * Replace the record only when its current version is this value.
+   * On the wire this is `If-Match: "<version>"`.
+   * Cannot be combined with `createOnly`.
+   */
+  ifVersion?: number;
 }
