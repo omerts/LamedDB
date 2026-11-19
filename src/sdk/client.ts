@@ -6,7 +6,7 @@ import type {
   PutOptions,
   RecordEnvelope,
 } from "../types.js";
-import { isPlainObject } from "../validate.js";
+import { isPlainObject, parsePutOptions } from "../validate.js";
 
 export interface LamedDBOptions {
   baseUrl: string;
@@ -93,19 +93,19 @@ async function putRecord(
   data: JsonObject,
   options?: PutOptions,
 ): Promise<RecordEnvelope> {
+  const putOptions = parsePutOptions(options);
   const headers: Record<string, string> = {};
-  const ifVersion = readIfVersion(options?.ifVersion);
 
-  if (options?.createOnly === true && ifVersion !== undefined) {
-    throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
-  }
-
-  if (options?.createOnly === true) {
+  if (putOptions.createOnly) {
     headers["if-none-match"] = "*";
   }
 
-  if (ifVersion !== undefined) {
-    headers["if-match"] = `"${ifVersion}"`;
+  if (putOptions.ifVersion !== undefined) {
+    headers["if-match"] = `"${putOptions.ifVersion}"`;
+  }
+
+  if (putOptions.idempotencyKey !== undefined) {
+    headers["idempotency-key"] = putOptions.idempotencyKey;
   }
 
   const parsed = await requestJson(transport, "PUT", recordPath(collection, id), data, headers);
@@ -191,18 +191,6 @@ function parseResponseJson(text: string): unknown {
   } catch {
     throw new LamedError("internal", "Server returned invalid JSON.");
   }
-}
-
-function readIfVersion(value: unknown): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new LamedError("invalid_argument", "ifVersion must be a non-negative safe integer.");
-  }
-
-  return value;
 }
 
 function recordPath(collection: string, id: string): string {
