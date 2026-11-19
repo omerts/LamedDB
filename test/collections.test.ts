@@ -839,21 +839,6 @@ describe("collections API", () => {
 
     expect(createQuery.status).toBe(400);
 
-    const idempotent = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
-      method: "PUT",
-      headers: {
-        "content-type": "application/json",
-        "if-match": '"1"',
-        "idempotency-key": "replace-ord-123",
-      },
-      body: JSON.stringify({ status: "paid" }),
-    });
-
-    expect(idempotent.status).toBe(400);
-    await expect(idempotent.json()).resolves.toMatchObject({
-      error: { code: "invalid_argument", message: "Idempotency-Key is not supported yet." },
-    });
-
     await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
       id: "ord_123",
       version: 1,

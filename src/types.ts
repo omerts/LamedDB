@@ -37,4 +37,11 @@ export interface PutOptions {
    * Cannot be combined with `createOnly`.
    */
   ifVersion?: number;
+
+  /**
+   * Replay this exact put instead of writing it twice.
+   * On the wire this is `Idempotency-Key`.
+   * A different put that reuses the key is rejected.
+   */
+  idempotencyKey?: string;
 }

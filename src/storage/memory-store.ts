@@ -8,9 +8,16 @@ interface StoredRecord {
   data: JsonObject;
 }
 
+interface IdempotencyEntry {
+  fingerprint: string;
+  created: boolean;
+  record: StoredRecord;
+}
+
 /**
  * Process-local store. Suitable for the first API slice and for tests.
  * Deleting a record keeps its version counter so the next put of that id continues at last + 1.
+ * Idempotency keys are kept per collection and survive that delete.
  */
 export class MemoryStore implements Store {
   private readonly collections = new Map<string, CollectionInfo>();
@@ -18,6 +25,8 @@ export class MemoryStore implements Store {
   private readonly records = new Map<string, StoredRecord>();
 
   private readonly versions = new Map<string, number>();
+
+  private readonly idempotency = new Map<string, IdempotencyEntry>();
 
   async createCollection(name: string, fields: FieldMap): Promise<CollectionInfo> {
     if (this.collections.has(name)) {
@@ -45,8 +54,53 @@ export class MemoryStore implements Store {
   }
 
   async putRecord(input: PutRecordInput): Promise<PutRecordResult> {
+    // applyPut does not await, so the check, the write, and the key record
+    // finish before another caller can enter.
+    return this.applyPut(input);
+  }
+
+  async getRecord(collection: string, id: string): Promise<RecordEnvelope | null> {
+    if (!this.collections.has(collection)) {
+      return null;
+    }
+
+    const stored = this.records.get(recordKey(collection, id));
+
+    if (!stored) {
+      return null;
+    }
+
+    return cloneRecord(stored);
+  }
+
+  /**
+   * Synchronous on purpose. An await between the idempotency check and the
+   * record update would let two puts with the same key both write.
+   */
+  private applyPut(input: PutRecordInput): PutRecordResult {
     if (!this.collections.has(input.collection)) {
       throw new LamedError("not_found", `Collection "${input.collection}" does not exist.`);
+    }
+
+    const idempotency = input.idempotency;
+    const idempotencyKey = idempotency
+      ? idempotencyStorageKey(input.collection, idempotency.key)
+      : undefined;
+    const recorded = idempotencyKey === undefined ? undefined : this.idempotency.get(idempotencyKey);
+
+    if (idempotency && recorded) {
+      if (recorded.fingerprint !== idempotency.fingerprint) {
+        throw new LamedError(
+          "idempotency_conflict",
+          `Idempotency key "${idempotency.key}" was already used for a different request.`,
+          { idempotencyKey: idempotency.key },
+        );
+      }
+
+      return {
+        created: recorded.created,
+        record: cloneRecord(recorded.record),
+      };
     }
 
     const key = recordKey(input.collection, input.id);
@@ -89,24 +143,18 @@ export class MemoryStore implements Store {
     this.versions.set(key, version);
     this.records.set(key, stored);
 
+    if (idempotency && idempotencyKey !== undefined) {
+      this.idempotency.set(idempotencyKey, {
+        fingerprint: idempotency.fingerprint,
+        created: existing === undefined,
+        record: snapshotRecord(stored),
+      });
+    }
+
     return {
       created: existing === undefined,
       record: cloneRecord(stored),
     };
-  }
-
-  async getRecord(collection: string, id: string): Promise<RecordEnvelope | null> {
-    if (!this.collections.has(collection)) {
-      return null;
-    }
-
-    const stored = this.records.get(recordKey(collection, id));
-
-    if (!stored) {
-      return null;
-    }
-
-    return cloneRecord(stored);
   }
 
   async deleteRecord(collection: string, id: string): Promise<boolean> {
@@ -125,6 +173,18 @@ export class MemoryStore implements Store {
 
 function recordKey(collection: string, id: string): string {
   return `${collection}\0${id}`;
+}
+
+function idempotencyStorageKey(collection: string, key: string): string {
+  return `${collection}\0idempotency\0${key}`;
+}
+
+function snapshotRecord(record: StoredRecord): StoredRecord {
+  return {
+    id: record.id,
+    version: record.version,
+    data: structuredClone(record.data),
+  };
 }
 
 function cloneFields(fields: FieldMap): FieldMap {

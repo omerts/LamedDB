@@ -4,7 +4,7 @@ import { CollectionService } from "../collections/service.js";
 import { LamedError } from "../errors.js";
 import { MemoryStore } from "../storage/memory-store.js";
 import type { Store } from "../storage/store.js";
-import { isPlainObject } from "../validate.js";
+import { isPlainObject, parseIdempotencyKey } from "../validate.js";
 import { OversizedBodyError, readJsonBody, readLimitedBody } from "./body.js";
 
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
@@ -113,12 +113,19 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
   const path = url.pathname;
 
   if (path === "/v1/collections") {
+    rejectUnexpectedQuery(url);
+
     if (method !== "POST") {
+      rejectIfMatch(req);
+      rejectIdempotencyKey(req);
+      rejectIfNoneMatch(req, "If-None-Match is not supported yet.");
+
       return methodNotAllowed(["POST"]);
     }
 
-    rejectUnexpectedQuery(url);
-    rejectUnsupportedPreconditions(req);
+    rejectIfMatch(req);
+    rejectIdempotencyKey(req);
+    rejectIfNoneMatch(req, "If-None-Match is not supported yet.");
 
     const body = parseCreateCollectionBody(await readJsonBody(req));
     const collection = await service.createCollection(body.name, { fields: body.fields });
@@ -150,15 +157,17 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
 
   if (method === "PUT") {
     rejectUnexpectedQuery(url);
-    rejectIdempotencyKey(req);
     rejectCombinedMatchHeaders(req);
 
+    const idempotencyKey = readIdempotencyKey(req);
     // createOnly is the bare If-None-Match: *. ifVersion is If-Match: "<version>".
     const createOnly = readCreateOnly(req);
     const ifVersion = readIfMatch(req);
+
     const outcome = await service.putRecord(name, id, await readJsonBody(req), {
       createOnly,
       ifVersion,
+      ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     });
 
     return {
@@ -173,8 +182,9 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
 
   if (method === "GET") {
     rejectUnexpectedQuery(url);
-    rejectUnsupportedPreconditions(req);
-    rejectIfNoneMatchHeader(req);
+    rejectIfMatch(req);
+    rejectIdempotencyKey(req);
+    rejectIfNoneMatch(req, "If-None-Match is not supported on this request.");
 
     await rejectUnexpectedBody(req, "GET");
 
@@ -191,8 +201,9 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
 
   if (method === "DELETE") {
     rejectUnexpectedQuery(url);
-    rejectUnsupportedPreconditions(req);
-    rejectDeleteIfNoneMatch(req);
+    rejectIfMatch(req);
+    rejectIdempotencyKey(req);
+    rejectIfNoneMatch(req, "If-None-Match is not supported yet.");
 
     await rejectUnexpectedBody(req, "Delete");
 
@@ -203,6 +214,11 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
       body: undefined,
     };
   }
+
+  rejectIfMatch(req);
+  rejectIdempotencyKey(req);
+  rejectIfNoneMatch(req, "If-None-Match is not supported yet.");
+  rejectUnexpectedQuery(url);
 
   return methodNotAllowed(["GET", "PUT", "DELETE"]);
 }
@@ -231,15 +247,13 @@ function parseCreateCollectionBody(body: unknown): { name: string; fields: unkno
   };
 }
 
-function rejectUnsupportedPreconditions(req: IncomingMessage): void {
+function rejectIfMatch(req: IncomingMessage): void {
   if (req.headers["if-match"] !== undefined) {
     throw new LamedError(
       "invalid_argument",
       "If-Match is not supported yet. Conditional replaces are a follow-up.",
     );
   }
-
-  rejectIdempotencyKey(req);
 }
 
 function rejectIdempotencyKey(req: IncomingMessage): void {
@@ -254,16 +268,45 @@ function rejectCombinedMatchHeaders(req: IncomingMessage): void {
   }
 }
 
-function rejectIfNoneMatchHeader(req: IncomingMessage): void {
+function rejectIfNoneMatch(req: IncomingMessage, message: string): void {
   if (req.headers["if-none-match"] !== undefined) {
-    throw new LamedError("invalid_argument", "If-None-Match is not supported on this request.");
+    throw new LamedError("invalid_argument", message);
   }
 }
 
-function rejectDeleteIfNoneMatch(req: IncomingMessage): void {
-  if (req.headers["if-none-match"] !== undefined) {
-    throw new LamedError("invalid_argument", "If-None-Match is not supported yet.");
+function readIdempotencyKey(req: IncomingMessage): string | undefined {
+  const values = rawHeaderValues(req, "idempotency-key");
+
+  if (values.length === 0) {
+    return undefined;
   }
+
+  if (values.length > 1) {
+    throw new LamedError("invalid_argument", "Idempotency-Key must be a single header value.");
+  }
+
+  const value = values[0];
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return parseIdempotencyKey(value);
+}
+
+function rawHeaderValues(req: IncomingMessage, name: string): string[] {
+  const values: string[] = [];
+
+  for (let index = 0; index < req.rawHeaders.length; index += 2) {
+    const headerName = req.rawHeaders[index];
+    const headerValue = req.rawHeaders[index + 1];
+
+    if (headerName !== undefined && headerValue !== undefined && headerName.toLowerCase() === name) {
+      values.push(headerValue);
+    }
+  }
+
+  return values;
 }
 
 function rejectUnexpectedQuery(url: URL): void {

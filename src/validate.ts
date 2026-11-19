@@ -8,6 +8,7 @@ export const LIMITS = {
   maxDepth: 32,
   maxObjectKeys: 256,
   maxArrayItems: 1_024,
+  maxIdempotencyKeyLength: 255,
 } as const;
 
 const COLLECTION_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,62}$/;
@@ -15,6 +16,7 @@ const RECORD_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const FIELD_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const FIELD_TYPES: readonly FieldType[] = ["string", "integer", "timestamp"];
+const PRINTABLE_ASCII = /^[\u0020-\u007E]+$/;
 
 export function parseCollectionName(name: unknown): string {
   if (typeof name !== "string") {
@@ -48,6 +50,82 @@ export function parseRecordId(id: unknown): string {
     "invalid_argument",
     `Record id "${preview(id)}" is not allowed. Use letters, digits, and . _ : -, starting with a letter or digit, up to 128 characters.`,
   );
+}
+
+export function parseIdempotencyKey(key: unknown): string {
+  if (typeof key !== "string") {
+    throw new LamedError("invalid_argument", "Idempotency-Key must be a string.", {
+      parameter: "idempotencyKey",
+    });
+  }
+
+  if (
+    key.length < 1 ||
+    key.length > LIMITS.maxIdempotencyKeyLength ||
+    !PRINTABLE_ASCII.test(key)
+  ) {
+    throw new LamedError(
+      "invalid_argument",
+      `Idempotency-Key must be 1-${LIMITS.maxIdempotencyKeyLength} printable ASCII characters.`,
+      { parameter: "idempotencyKey" },
+    );
+  }
+
+  return key;
+}
+
+/** Runtime check for put options. Unknown options are rejected, not ignored. */
+export function parsePutOptions(options: unknown): {
+  createOnly: boolean;
+  idempotencyKey?: string;
+  ifVersion?: number;
+} {
+  if (options === undefined) {
+    return { createOnly: false };
+  }
+
+  if (!isPlainObject(options)) {
+    throw new LamedError("invalid_argument", "Put options must be an object.");
+  }
+
+  for (const key of Object.keys(options)) {
+    if (key !== "createOnly" && key !== "idempotencyKey" && key !== "ifVersion") {
+      throw new LamedError("invalid_argument", `Unknown put option "${preview(key)}".`);
+    }
+  }
+
+  const createOnly = options.createOnly;
+
+  if (createOnly !== undefined && typeof createOnly !== "boolean") {
+    throw new LamedError("invalid_argument", 'Option "createOnly" must be a boolean.');
+  }
+
+  const ifVersion = parseIfVersion(options.ifVersion);
+
+  if (createOnly === true && ifVersion !== undefined) {
+    throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
+  }
+
+  const idempotencyKey =
+    options.idempotencyKey === undefined ? undefined : parseIdempotencyKey(options.idempotencyKey);
+
+  return {
+    createOnly: createOnly === true,
+    ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+    ...(ifVersion !== undefined ? { ifVersion } : {}),
+  };
+}
+
+function parseIfVersion(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new LamedError("invalid_argument", "ifVersion must be a non-negative safe integer.");
+  }
+
+  return value;
 }
 
 export function parseFieldDeclarations(fields: unknown): FieldMap {

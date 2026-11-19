@@ -1,9 +1,10 @@
 import { LamedError } from "../errors.js";
-import type { Store } from "../storage/store.js";
-import type { CollectionInfo, PutOptions, RecordEnvelope } from "../types.js";
+import type { IdempotentPut, Store } from "../storage/store.js";
+import type { CollectionInfo, JsonObject, JsonValue, PutOptions, RecordEnvelope } from "../types.js";
 import {
   parseCollectionName,
   parseFieldDeclarations,
+  parsePutOptions,
   parseRecordId,
   validateDocument,
 } from "../validate.js";
@@ -33,24 +34,21 @@ export class CollectionService {
     data: unknown,
     options: PutOptions = {},
   ): Promise<PutOutcome> {
+    const putOptions = parsePutOptions(options);
     const collectionName = parseCollectionName(name);
     const recordId = parseRecordId(id);
-    const createOnly = options.createOnly === true;
-    const ifVersion = parseIfVersion(options.ifVersion);
-
-    if (createOnly && ifVersion !== undefined) {
-      throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
-    }
 
     const collection = await this.requireCollection(collectionName);
     const document = validateDocument(data, collection.fields);
+    const idempotency = idempotentPut(putOptions, recordId, document);
 
     return this.store.putRecord({
       collection: collectionName,
       id: recordId,
       data: document,
-      createOnly,
-      ifVersion,
+      createOnly: putOptions.createOnly,
+      ifVersion: putOptions.ifVersion,
+      idempotency,
     });
   }
 
@@ -99,14 +97,66 @@ export class CollectionService {
   }
 }
 
-function parseIfVersion(value: unknown): number | undefined {
-  if (value === undefined) {
+function idempotentPut(
+  options: { idempotencyKey?: string; createOnly: boolean; ifVersion?: number },
+  id: string,
+  data: JsonObject,
+): IdempotentPut | undefined {
+  if (options.idempotencyKey === undefined) {
     return undefined;
   }
 
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new LamedError("invalid_argument", "ifVersion must be a non-negative safe integer.");
+  return {
+    key: options.idempotencyKey,
+    fingerprint: fingerprintRecordWrite({
+      id,
+      data,
+      createOnly: options.createOnly,
+      ifVersion: options.ifVersion,
+    }),
+  };
+}
+
+/**
+ * Canonical request identity. Object key order is not part of the request.
+ * Every option that changes the write belongs in this payload, including ifVersion.
+ */
+function fingerprintRecordWrite(input: {
+  id: string;
+  data: JsonObject;
+  createOnly: boolean;
+  ifVersion: number | undefined;
+}): string {
+  const payload: JsonObject = {
+    id: input.id,
+    data: input.data,
+    createOnly: input.createOnly,
+    ifVersion: input.ifVersion ?? null,
+  };
+
+  return stableStringify(payload);
+}
+
+function stableStringify(value: JsonValue): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
   }
 
-  return value;
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+
+  const parts: string[] = [];
+
+  for (const key of Object.keys(value).sort()) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+
+    if (descriptor === undefined || !("value" in descriptor)) {
+      throw new LamedError("internal", "Idempotency fingerprint is missing a value.");
+    }
+
+    parts.push(`${JSON.stringify(key)}:${stableStringify(descriptor.value as JsonValue)}`);
+  }
+
+  return `{${parts.join(",")}}`;
 }
