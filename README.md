@@ -34,7 +34,7 @@ The server listens on `http://127.0.0.1:8080`. Override the bind address with `H
 
 ## API
 
-Declared field types are `string`, `integer` (a JSON safe integer), and `timestamp` (a UTC instant with millisecond precision, such as `2026-11-19T08:15:00.000Z`). Null is a stored value. Fields that are not declared are stored as JSON. `put` replaces the whole document. The first write of an id is version `1`, and each successful replace adds 1. `delete` removes the record. A later put of that id starts again at version `1`.
+Declared field types are `string`, `integer` (a JSON safe integer), and `timestamp` (a UTC instant with millisecond precision, such as `2026-11-19T08:15:00.000Z`). Null is a stored value. Fields that are not declared are stored as JSON. `put` replaces the whole document. The first write of an id is version `1`, and each successful replace adds 1. `delete` removes the record and keeps its last version. A later put of that id continues at last + 1, so an `ETag` from before the delete does not match the recreated record.
 
 `createOnly` is sent as `If-None-Match: *`. If the record already exists, the response is `412` and the stored record is unchanged.
 

@@ -395,7 +395,7 @@ describe("collections API", () => {
     });
   });
 
-  it("deletes a record and lets the same id start again at version 1", async () => {
+  it("deletes a record and continues the version when the same id is created again", async () => {
     await db.admin.createCollection("orders", { fields: { status: "string" } });
 
     const orders = db.collection("orders");
@@ -427,7 +427,7 @@ describe("collections API", () => {
 
     expect(recreated).toEqual({
       id: "ord_123",
-      version: 1,
+      version: 3,
       data: { status: "open" },
     });
 
@@ -668,6 +668,32 @@ describe("collections API", () => {
       data: { status: "paid" },
     });
     await expect(orders.get("ord_missing")).rejects.toMatchObject({ code: "not_found", status: 404 });
+  });
+
+  it("returns 412 for a stale If-Match after the record is deleted and created again", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    const created = await orders.put("ord_123", { status: "open" });
+
+    expect(created.version).toBe(1);
+
+    await orders.delete("ord_123");
+
+    const recreated = await orders.put("ord_123", { status: "reopened" }, { createOnly: true });
+
+    expect(recreated).toEqual({
+      id: "ord_123",
+      version: 2,
+      data: { status: "reopened" },
+    });
+
+    await expect(orders.put("ord_123", { status: "stale" }, { ifVersion: 1 })).rejects.toMatchObject({
+      code: "precondition_failed",
+      status: 412,
+      message: 'Record "ord_123" in collection "orders" is version 2, not 1.',
+    });
+    await expect(orders.get("ord_123")).resolves.toEqual(recreated);
   });
 
   it("returns 400 for a malformed If-Match and for If-Match combined with If-None-Match", async () => {

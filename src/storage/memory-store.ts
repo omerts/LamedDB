@@ -10,7 +10,7 @@ interface StoredRecord {
 
 /**
  * Process-local store. Suitable for the first API slice and for tests.
- * Deleting a record drops its version so the next put of that id starts at 1.
+ * Deleting a record keeps its version counter so the next put of that id continues at last + 1.
  */
 export class MemoryStore implements Store {
   private readonly collections = new Map<string, CollectionInfo>();
@@ -115,15 +115,11 @@ export class MemoryStore implements Store {
     }
 
     const key = recordKey(collection, id);
-    const existed = this.records.delete(key);
 
-    if (!existed) {
-      return false;
-    }
+    // Leave the version counter in place. The next put continues at last + 1,
+    // so an ETag from before this delete cannot match the recreated record.
 
-    this.versions.delete(key);
-
-    return true;
+    return this.records.delete(key);
   }
 }
 
