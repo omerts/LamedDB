@@ -57,6 +57,10 @@ export class CollectionClient {
   get(id: string): Promise<RecordEnvelope> {
     return getRecord(this.transport, this.name, id);
   }
+
+  delete(id: string): Promise<void> {
+    return deleteRecord(this.transport, this.name, id);
+  }
 }
 
 async function createCollection(
@@ -104,6 +108,10 @@ async function getRecord(transport: Transport, collection: string, id: string): 
   const parsed = await requestJson(transport, "GET", recordPath(collection, id));
 
   return parseEnvelope(parsed);
+}
+
+async function deleteRecord(transport: Transport, collection: string, id: string): Promise<void> {
+  await requestJson(transport, "DELETE", recordPath(collection, id));
 }
 
 async function requestJson(

@@ -5,7 +5,7 @@ import { LamedError } from "../errors.js";
 import { MemoryStore } from "../storage/memory-store.js";
 import type { Store } from "../storage/store.js";
 import { isPlainObject } from "../validate.js";
-import { OversizedBodyError, readJsonBody } from "./body.js";
+import { OversizedBodyError, readJsonBody, readLimitedBody } from "./body.js";
 
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
 
@@ -176,7 +176,22 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
     };
   }
 
-  return methodNotAllowed(["GET", "PUT"]);
+  if (method === "DELETE") {
+    rejectUnsupportedPreconditions(req);
+    rejectDeleteIfNoneMatch(req);
+    rejectDeleteQuery(url);
+
+    await rejectDeleteBody(req);
+
+    await service.deleteRecord(name, id);
+
+    return {
+      status: 204,
+      body: undefined,
+    };
+  }
+
+  return methodNotAllowed(["GET", "PUT", "DELETE"]);
 }
 
 function parseCreateCollectionBody(body: unknown): { name: string; fields: unknown } {
@@ -214,6 +229,35 @@ function rejectUnsupportedPreconditions(req: IncomingMessage): void {
   if (req.headers["idempotency-key"] !== undefined) {
     throw new LamedError("invalid_argument", "Idempotency-Key is not supported yet.");
   }
+}
+
+function rejectDeleteIfNoneMatch(req: IncomingMessage): void {
+  if (req.headers["if-none-match"] !== undefined) {
+    throw new LamedError("invalid_argument", "If-None-Match is not supported yet.");
+  }
+}
+
+function rejectDeleteQuery(url: URL): void {
+  const name = url.searchParams.keys().next();
+
+  if (name.done) {
+    return;
+  }
+
+  throw new LamedError(
+    "invalid_argument",
+    `Unknown query parameter "${previewKey(name.value)}". Delete does not support query parameters.`,
+  );
+}
+
+async function rejectDeleteBody(req: IncomingMessage): Promise<void> {
+  const body = await readLimitedBody(req);
+
+  if (body.length === 0) {
+    return;
+  }
+
+  throw new LamedError("invalid_argument", "Delete does not accept a request body.");
 }
 
 function readCreateOnly(req: IncomingMessage): boolean {
@@ -254,6 +298,18 @@ function writeJson(
 ): void {
   if (res.headersSent || res.writableEnded) {
     onFlushed?.();
+
+    return;
+  }
+
+  if (status === 204) {
+    res.writeHead(status, {
+      "cache-control": "no-store",
+      ...headers,
+    });
+    res.end(() => {
+      onFlushed?.();
+    });
 
     return;
   }

@@ -392,6 +392,211 @@ describe("collections API", () => {
       data: { status: "open" },
     });
   });
+
+  it("deletes a record and lets the same id start again at version 1", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    await orders.put("ord_123", { status: "open" });
+    await orders.put("ord_123", { status: "paid" });
+    await orders.put("ord_other", { status: "held" });
+
+    const removed = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "DELETE",
+    });
+
+    expect(removed.status).toBe(204);
+    expect(removed.headers.get("content-type")).toBeNull();
+    expect(removed.headers.get("content-length")).toBeNull();
+    expect(await removed.text()).toBe("");
+
+    await expect(orders.get("ord_123")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Record "ord_123" was not found in collection "orders".',
+    });
+    await expect(orders.get("ord_other")).resolves.toEqual({
+      id: "ord_other",
+      version: 1,
+      data: { status: "held" },
+    });
+
+    const recreated = await orders.put("ord_123", { status: "open" }, { createOnly: true });
+
+    expect(recreated).toEqual({
+      id: "ord_123",
+      version: 1,
+      data: { status: "open" },
+    });
+
+    await expect(orders.delete("ord_123")).resolves.toBeUndefined();
+    await expect(orders.get("ord_123")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+    });
+  });
+
+  it("returns 404 when deleting a missing record or a record in a missing collection", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    await orders.put("ord_123", { status: "open" });
+
+    await expect(orders.delete("ord_missing")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Record "ord_missing" was not found in collection "orders".',
+    });
+    await expect(db.collection("missing").delete("ord_123")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Collection "missing" does not exist.',
+    });
+
+    await expect(orders.get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 1,
+      data: { status: "open" },
+    });
+    await expect(db.collection("missing").get("ord_123")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Collection "missing" does not exist.',
+    });
+  });
+
+  it("returns 400 for an invalid collection name or record id on delete and does not write", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    await orders.put("ord_123", { status: "open" });
+
+    await expect(db.collection("1orders").delete("ord_123")).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message:
+        'Collection name "1orders" is not allowed. Use a letter, then letters, digits, underscores, or hyphens, up to 63 characters.',
+    });
+    await expect(orders.delete("-bad")).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message:
+        'Record id "-bad" is not allowed. Use letters, digits, and . _ : -, starting with a letter or digit, up to 128 characters.',
+    });
+
+    const invalidId = await fetch(`${running?.url}/v1/collections/orders/records/-bad`, {
+      method: "DELETE",
+    });
+
+    expect(invalidId.status).toBe(400);
+    await expect(invalidId.json()).resolves.toMatchObject({
+      error: { code: "invalid_argument" },
+    });
+
+    await expect(orders.get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 1,
+      data: { status: "open" },
+    });
+  });
+
+  it("rejects If-Match, If-None-Match, and Idempotency-Key on delete and leaves the record unchanged", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+    await db.collection("orders").put("ord_123", { status: "open" });
+    await db.collection("orders").put("ord_123", { status: "paid" });
+
+    const baseUrl = `${running?.url}/v1/collections/orders/records/ord_123`;
+    const cases = [
+      {
+        header: "if-match",
+        value: '"2"',
+        message: "If-Match is not supported yet. Conditional replaces are a follow-up.",
+      },
+      {
+        header: "if-none-match",
+        value: "*",
+        message: "If-None-Match is not supported yet.",
+      },
+      {
+        header: "idempotency-key",
+        value: "delete-ord-123",
+        message: "Idempotency-Key is not supported yet.",
+      },
+    ];
+
+    for (const entry of cases) {
+      const response = await fetch(baseUrl, {
+        method: "DELETE",
+        headers: { [entry.header]: entry.value },
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: "invalid_argument",
+          message: entry.message,
+        },
+      });
+    }
+
+    await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 2,
+      data: { status: "paid" },
+    });
+  });
+
+  it("rejects a query parameter or a body on delete and leaves the record unchanged", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+    await db.collection("orders").put("ord_123", { status: "paid" });
+
+    const conditional = await fetch(
+      `${running?.url}/v1/collections/orders/records/ord_123?ifVersion=999`,
+      { method: "DELETE" },
+    );
+
+    expect(conditional.status).toBe(400);
+    await expect(conditional.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: 'Unknown query parameter "ifVersion". Delete does not support query parameters.',
+      },
+    });
+
+    const withBody = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ifVersion: 999 }),
+    });
+
+    expect(withBody.status).toBe(400);
+    await expect(withBody.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "Delete does not accept a request body.",
+      },
+    });
+
+    const plainBody = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "DELETE",
+      headers: { "content-type": "text/plain" },
+      body: "ifVersion=999",
+    });
+
+    expect(plainBody.status).toBe(400);
+    await expect(plainBody.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "Delete does not accept a request body.",
+      },
+    });
+
+    await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 1,
+      data: { status: "paid" },
+    });
+  });
 });
 
 describe("parseCollectionName and parseRecordId", () => {
