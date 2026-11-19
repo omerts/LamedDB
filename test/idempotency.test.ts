@@ -2,7 +2,7 @@ import { connect } from "node:net";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { LamedDB, listen, type PutOptions, type RunningServer } from "../src/index.js";
+import { CollectionService, LamedDB, MemoryStore, listen, type PutOptions, type RunningServer } from "../src/index.js";
 import { LIMITS, parseIdempotencyKey, parsePutOptions } from "../src/validate.js";
 
 describe("idempotency keys", () => {
@@ -622,6 +622,48 @@ describe("idempotency keys", () => {
       status: 400,
       message: 'Option "createOnly" must be a boolean.',
     });
+    await expect(
+      orders.put("ord_123", { status: "paid" }, { idempotencyKey: " key " }),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "Idempotency-Key must not have leading or trailing whitespace.",
+    });
+    await expect(
+      orders.put("ord_123", { status: "paid" }, { idempotencyKey: "key " }),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "Idempotency-Key must not have leading or trailing whitespace.",
+    });
+
+    let calls = 0;
+    const watched = new LamedDB({
+      baseUrl: running?.url ?? "",
+      fetch: async (input, init) => {
+        calls += 1;
+
+        return fetch(input, init);
+      },
+    });
+    const hidden: PutOptions = {};
+
+    Object.defineProperty(hidden, "ttl", { value: 5, enumerable: false });
+
+    await expect(watched.collection("orders").put("ord_123", { status: "paid" }, hidden)).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: 'Unknown put option "ttl".',
+    });
+
+    const symbolic = { [Symbol("lane")]: true } as PutOptions;
+
+    await expect(watched.collection("orders").put("ord_123", { status: "paid" }, symbolic)).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: 'Unknown put option "lane".',
+    });
+    expect(calls).toBe(0);
     await expect(orders.get("ord_123")).rejects.toMatchObject({ code: "not_found" });
   });
 
@@ -693,6 +735,28 @@ interface PutResponse {
   json: () => Promise<unknown>;
 }
 
+describe("idempotency key validation", () => {
+  it("rejects a padded key in the service before writing", async () => {
+    // Node strips leading and trailing spaces from header values, so a raw
+    // request cannot deliver them. The HTTP handler uses this same parser.
+    const service = new CollectionService(new MemoryStore());
+
+    await service.createCollection("orders", { fields: { status: "string" } });
+
+    await expect(
+      service.putRecord("orders", "ord_123", { status: "paid" }, { idempotencyKey: " key " }),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "Idempotency-Key must not have leading or trailing whitespace.",
+    });
+    await expect(service.getRecord("orders", "ord_123")).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+    });
+  });
+});
+
 describe("parseIdempotencyKey", () => {
   it("rejects non-strings, control characters, and the wrong length", () => {
     expect(() => parseIdempotencyKey(12)).toThrow(
@@ -718,7 +782,24 @@ describe("parseIdempotencyKey", () => {
       expect.objectContaining({ code: "invalid_argument" }),
     );
     expect(parseIdempotencyKey("k".repeat(LIMITS.maxIdempotencyKeyLength))).toHaveLength(255);
-    expect(parseIdempotencyKey(" ")).toBe(" ");
+    expect(parseIdempotencyKey("a b")).toBe("a b");
+    expect(() => parseIdempotencyKey(" ")).toThrow(
+      expect.objectContaining({
+        code: "invalid_argument",
+        status: 400,
+        message: "Idempotency-Key must not have leading or trailing whitespace.",
+      }),
+    );
+    expect(() => parseIdempotencyKey(" key")).toThrow(
+      expect.objectContaining({
+        message: "Idempotency-Key must not have leading or trailing whitespace.",
+      }),
+    );
+    expect(() => parseIdempotencyKey("key ")).toThrow(
+      expect.objectContaining({
+        message: "Idempotency-Key must not have leading or trailing whitespace.",
+      }),
+    );
     expect(parsePutOptions({ createOnly: false, idempotencyKey: "abc" })).toEqual({
       createOnly: false,
       idempotencyKey: "abc",

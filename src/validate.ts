@@ -59,11 +59,15 @@ export function parseIdempotencyKey(key: unknown): string {
     });
   }
 
-  if (
-    key.length < 1 ||
-    key.length > LIMITS.maxIdempotencyKeyLength ||
-    !PRINTABLE_ASCII.test(key)
-  ) {
+  if (key !== key.trim()) {
+    throw new LamedError(
+      "invalid_argument",
+      "Idempotency-Key must not have leading or trailing whitespace.",
+      { parameter: "idempotencyKey" },
+    );
+  }
+
+  if (key.length < 1 || key.length > LIMITS.maxIdempotencyKeyLength || !PRINTABLE_ASCII.test(key)) {
     throw new LamedError(
       "invalid_argument",
       `Idempotency-Key must be 1-${LIMITS.maxIdempotencyKeyLength} printable ASCII characters.`,
@@ -88,9 +92,9 @@ export function parsePutOptions(options: unknown): {
     throw new LamedError("invalid_argument", "Put options must be an object.");
   }
 
-  for (const key of Object.keys(options)) {
+  for (const key of Reflect.ownKeys(options)) {
     if (key !== "createOnly" && key !== "idempotencyKey" && key !== "ifVersion") {
-      throw new LamedError("invalid_argument", `Unknown put option "${preview(key)}".`);
+      throw new LamedError("invalid_argument", `Unknown put option "${optionKeyName(key)}".`);
     }
   }
 
@@ -336,6 +340,14 @@ function joinPath(parent: string, key: string): string {
   }
 
   return `${parent}[${JSON.stringify(key)}]`;
+}
+
+function optionKeyName(key: string | symbol): string {
+  if (typeof key === "string") {
+    return preview(key);
+  }
+
+  return preview(key.description ?? "symbol");
 }
 
 function preview(value: string): string {
