@@ -10,7 +10,7 @@ interface StoredRecord {
 
 /**
  * Process-local store. Suitable for the first API slice and for tests.
- * Deleting a record drops its version so the next put of that id starts at 1.
+ * Deleting a record keeps its version counter so the next put of that id continues at last + 1.
  */
 export class MemoryStore implements Store {
   private readonly collections = new Map<string, CollectionInfo>();
@@ -52,7 +52,27 @@ export class MemoryStore implements Store {
     const key = recordKey(input.collection, input.id);
     const existing = this.records.get(key);
 
-    if (existing && input.createOnly) {
+    // The compare and the two map writes below stay synchronous. An await
+    // between them would let a second If-Match on the same version succeed.
+    if (input.ifVersion !== undefined && input.createOnly) {
+      throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
+    }
+
+    if (input.ifVersion !== undefined) {
+      if (existing === undefined) {
+        throw new LamedError(
+          "precondition_failed",
+          `Record "${input.id}" was not found in collection "${input.collection}".`,
+        );
+      }
+
+      if (existing.version !== input.ifVersion) {
+        throw new LamedError(
+          "precondition_failed",
+          `Record "${input.id}" in collection "${input.collection}" is version ${existing.version}, not ${input.ifVersion}.`,
+        );
+      }
+    } else if (existing && input.createOnly) {
       throw new LamedError(
         "precondition_failed",
         `Record "${input.id}" already exists in collection "${input.collection}".`,
@@ -95,15 +115,11 @@ export class MemoryStore implements Store {
     }
 
     const key = recordKey(collection, id);
-    const existed = this.records.delete(key);
 
-    if (!existed) {
-      return false;
-    }
+    // Leave the version counter in place. The next put continues at last + 1,
+    // so an ETag from before this delete cannot match the recreated record.
 
-    this.versions.delete(key);
-
-    return true;
+    return this.records.delete(key);
   }
 }
 

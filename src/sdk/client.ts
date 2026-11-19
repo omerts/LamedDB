@@ -94,9 +94,18 @@ async function putRecord(
   options?: PutOptions,
 ): Promise<RecordEnvelope> {
   const headers: Record<string, string> = {};
+  const ifVersion = readIfVersion(options?.ifVersion);
+
+  if (options?.createOnly === true && ifVersion !== undefined) {
+    throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
+  }
 
   if (options?.createOnly === true) {
     headers["if-none-match"] = "*";
+  }
+
+  if (ifVersion !== undefined) {
+    headers["if-match"] = `"${ifVersion}"`;
   }
 
   const parsed = await requestJson(transport, "PUT", recordPath(collection, id), data, headers);
@@ -182,6 +191,18 @@ function parseResponseJson(text: string): unknown {
   } catch {
     throw new LamedError("internal", "Server returned invalid JSON.");
   }
+}
+
+function readIfVersion(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new LamedError("invalid_argument", "ifVersion must be a non-negative safe integer.");
+  }
+
+  return value;
 }
 
 function recordPath(collection: string, id: string): string {

@@ -35,6 +35,13 @@ export class CollectionService {
   ): Promise<PutOutcome> {
     const collectionName = parseCollectionName(name);
     const recordId = parseRecordId(id);
+    const createOnly = options.createOnly === true;
+    const ifVersion = parseIfVersion(options.ifVersion);
+
+    if (createOnly && ifVersion !== undefined) {
+      throw new LamedError("invalid_argument", "If-Match and If-None-Match cannot be used together.");
+    }
+
     const collection = await this.requireCollection(collectionName);
     const document = validateDocument(data, collection.fields);
 
@@ -42,7 +49,8 @@ export class CollectionService {
       collection: collectionName,
       id: recordId,
       data: document,
-      createOnly: options.createOnly === true,
+      createOnly,
+      ifVersion,
     });
   }
 
@@ -89,4 +97,16 @@ export class CollectionService {
 
     return collection;
   }
+}
+
+function parseIfVersion(value: unknown): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new LamedError("invalid_argument", "ifVersion must be a non-negative safe integer.");
+  }
+
+  return value;
 }

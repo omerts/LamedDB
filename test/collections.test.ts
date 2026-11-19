@@ -1,3 +1,5 @@
+import { request as httpRequest } from "node:http";
+
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { LamedDB, LamedError, listen, type RunningServer } from "../src/index.js";
@@ -393,7 +395,7 @@ describe("collections API", () => {
     });
   });
 
-  it("deletes a record and lets the same id start again at version 1", async () => {
+  it("deletes a record and continues the version when the same id is created again", async () => {
     await db.admin.createCollection("orders", { fields: { status: "string" } });
 
     const orders = db.collection("orders");
@@ -425,7 +427,7 @@ describe("collections API", () => {
 
     expect(recreated).toEqual({
       id: "ord_123",
-      version: 1,
+      version: 3,
       data: { status: "open" },
     });
 
@@ -559,7 +561,7 @@ describe("collections API", () => {
     await expect(conditional.json()).resolves.toMatchObject({
       error: {
         code: "invalid_argument",
-        message: 'Unknown query parameter "ifVersion". Delete does not support query parameters.',
+        message: 'Unknown query parameter "ifVersion".',
       },
     });
 
@@ -597,7 +599,318 @@ describe("collections API", () => {
       data: { status: "paid" },
     });
   });
+
+  it("replaces a record when If-Match is the current version and returns the next one", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    const created = await orders.put("ord_123", { status: "open" });
+    const fetched = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`);
+
+    expect(created.version).toBe(1);
+    expect(fetched.headers.get("etag")).toBe('"1"');
+
+    const replaced = await orders.put("ord_123", { status: "paid" }, { ifVersion: 1 });
+    const again = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "if-match": '"2"',
+      },
+      body: JSON.stringify({ status: "refunded" }),
+    });
+
+    expect(replaced).toEqual({
+      id: "ord_123",
+      version: 2,
+      data: { status: "paid" },
+    });
+    expect(again.status).toBe(200);
+    expect(again.headers.get("etag")).toBe('"3"');
+    await expect(again.json()).resolves.toEqual({
+      id: "ord_123",
+      version: 3,
+      data: { status: "refunded" },
+    });
+    await expect(orders.get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 3,
+      data: { status: "refunded" },
+    });
+  });
+
+  it("returns 412 for a stale If-Match or for If-Match on a missing record and writes nothing", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    await orders.put("ord_123", { status: "open" });
+    await orders.put("ord_123", { status: "paid" });
+
+    await expect(orders.put("ord_123", { status: "refunded" }, { ifVersion: 1 })).rejects.toMatchObject({
+      code: "precondition_failed",
+      status: 412,
+      message: 'Record "ord_123" in collection "orders" is version 2, not 1.',
+    });
+    await expect(orders.put("ord_missing", { status: "open" }, { ifVersion: 1 })).rejects.toMatchObject({
+      code: "precondition_failed",
+      status: 412,
+      message: 'Record "ord_missing" was not found in collection "orders".',
+    });
+    await expect(db.collection("missing").put("ord_123", { status: "open" }, { ifVersion: 1 })).rejects.toMatchObject({
+      code: "not_found",
+      status: 404,
+      message: 'Collection "missing" does not exist.',
+    });
+
+    await expect(orders.get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 2,
+      data: { status: "paid" },
+    });
+    await expect(orders.get("ord_missing")).rejects.toMatchObject({ code: "not_found", status: 404 });
+  });
+
+  it("returns 412 for a stale If-Match after the record is deleted and created again", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    const created = await orders.put("ord_123", { status: "open" });
+
+    expect(created.version).toBe(1);
+
+    await orders.delete("ord_123");
+
+    const recreated = await orders.put("ord_123", { status: "reopened" }, { createOnly: true });
+
+    expect(recreated).toEqual({
+      id: "ord_123",
+      version: 2,
+      data: { status: "reopened" },
+    });
+
+    await expect(orders.put("ord_123", { status: "stale" }, { ifVersion: 1 })).rejects.toMatchObject({
+      code: "precondition_failed",
+      status: 412,
+      message: 'Record "ord_123" in collection "orders" is version 2, not 1.',
+    });
+    await expect(orders.get("ord_123")).resolves.toEqual(recreated);
+  });
+
+  it("returns 400 for a malformed If-Match and for If-Match combined with If-None-Match", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+    await db.collection("orders").put("ord_123", { status: "open" });
+
+    const baseUrl = `${running?.url}/v1/collections/orders/records/ord_123`;
+    const malformed = ["*", "1", '"1", "2"', 'W/"1"', '"abc"', '"01"'];
+
+    for (const header of malformed) {
+      const response = await fetch(baseUrl, {
+        method: "PUT",
+        headers: {
+          "content-type": "application/json",
+          "if-match": header,
+        },
+        body: JSON.stringify({ status: "paid" }),
+      });
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "invalid_argument" },
+      });
+    }
+
+    const both = await fetch(baseUrl, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "if-match": '"1"',
+        "if-none-match": "*",
+      },
+      body: JSON.stringify({ status: "paid" }),
+    });
+
+    expect(both.status).toBe(400);
+    await expect(both.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "If-Match and If-None-Match cannot be used together.",
+      },
+    });
+
+    await expect(
+      db.collection("orders").put("ord_123", { status: "paid" }, { createOnly: true, ifVersion: 1 }),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "If-Match and If-None-Match cannot be used together.",
+    });
+    await expect(
+      db.collection("orders").put("ord_123", { status: "paid" }, { ifVersion: 1.5 }),
+    ).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "ifVersion must be a non-negative safe integer.",
+    });
+
+    await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 1,
+      data: { status: "open" },
+    });
+  });
+
+  it("lets only one of two concurrent If-Match writes on the same version succeed", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    await orders.put("ord_123", { status: "open" });
+
+    const [first, second] = await Promise.allSettled([
+      orders.put("ord_123", { status: "left" }, { ifVersion: 1 }),
+      orders.put("ord_123", { status: "right" }, { ifVersion: 1 }),
+    ]);
+    const outcomes = [first, second];
+    const succeeded = outcomes.filter((outcome) => outcome.status === "fulfilled");
+    const failed = outcomes.filter((outcome) => outcome.status === "rejected");
+
+    expect(succeeded).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+
+    const winner = succeeded[0];
+    const loser = failed[0];
+
+    if (winner?.status !== "fulfilled" || loser?.status !== "rejected") {
+      throw new Error("Expected one successful If-Match write and one 412.");
+    }
+
+    expect(winner.value.version).toBe(2);
+    expect(loser.reason).toMatchObject({
+      code: "precondition_failed",
+      status: 412,
+    });
+    await expect(orders.get("ord_123")).resolves.toEqual(winner.value);
+  });
+
+  it("rejects an unexpected query parameter or body before a read or a conditional write", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+    await db.collection("orders").put("ord_123", { status: "open" });
+
+    const putQuery = await fetch(
+      `${running?.url}/v1/collections/orders/records/ord_123?ifVersion=1`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json", "if-match": '"1"' },
+        body: JSON.stringify({ status: "paid" }),
+      },
+    );
+
+    expect(putQuery.status).toBe(400);
+    await expect(putQuery.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: 'Unknown query parameter "ifVersion".',
+      },
+    });
+
+    const getQuery = await fetch(`${running?.url}/v1/collections/orders/records/ord_123?ifVersion=1`);
+
+    expect(getQuery.status).toBe(400);
+    await expect(getQuery.json()).resolves.toMatchObject({
+      error: { code: "invalid_argument", message: 'Unknown query parameter "ifVersion".' },
+    });
+
+    const getBody = await requestWithBody(
+      `${running?.url}/v1/collections/orders/records/ord_123`,
+      "GET",
+      JSON.stringify({ ifVersion: 1 }),
+      { "content-type": "application/json" },
+    );
+
+    expect(getBody.status).toBe(400);
+    expect(getBody.json).toMatchObject({
+      error: { code: "invalid_argument", message: "GET does not accept a request body." },
+    });
+
+    const createQuery = await fetch(`${running?.url}/v1/collections?ifVersion=1`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "tickets" }),
+    });
+
+    expect(createQuery.status).toBe(400);
+
+    const idempotent = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        "if-match": '"1"',
+        "idempotency-key": "replace-ord-123",
+      },
+      body: JSON.stringify({ status: "paid" }),
+    });
+
+    expect(idempotent.status).toBe(400);
+    await expect(idempotent.json()).resolves.toMatchObject({
+      error: { code: "invalid_argument", message: "Idempotency-Key is not supported yet." },
+    });
+
+    await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 1,
+      data: { status: "open" },
+    });
+
+    const tickets = await fetch(`${running?.url}/v1/collections`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "tickets" }),
+    });
+
+    expect(tickets.status).toBe(201);
+  });
 });
+
+function requestWithBody(
+  url: string,
+  method: string,
+  body: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; json: unknown }> {
+  const target = new URL(url);
+
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        hostname: target.hostname,
+        port: target.port,
+        path: `${target.pathname}${target.search}`,
+        method,
+        headers: {
+          ...headers,
+          "content-length": Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+
+        res.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+
+          resolve({
+            status: res.statusCode ?? 0,
+            json: text.length === 0 ? undefined : (JSON.parse(text) as unknown),
+          });
+        });
+      },
+    );
+
+    req.on("error", reject);
+    req.end(body);
+  });
+}
 
 describe("parseCollectionName and parseRecordId", () => {
   it("rejects non-string values instead of coercing them into identifiers", () => {
