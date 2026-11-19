@@ -5,7 +5,7 @@ import { LamedError } from "../errors.js";
 import { MemoryStore } from "../storage/memory-store.js";
 import type { Store } from "../storage/store.js";
 import { isPlainObject } from "../validate.js";
-import { OversizedBodyError, readJsonBody } from "./body.js";
+import { OversizedBodyError, readJsonBody, readLimitedBody } from "./body.js";
 
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
 
@@ -179,6 +179,9 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
   if (method === "DELETE") {
     rejectUnsupportedPreconditions(req);
     rejectDeleteIfNoneMatch(req);
+    rejectDeleteQuery(url);
+
+    await rejectDeleteBody(req);
 
     await service.deleteRecord(name, id);
 
@@ -234,6 +237,29 @@ function rejectDeleteIfNoneMatch(req: IncomingMessage): void {
   }
 }
 
+function rejectDeleteQuery(url: URL): void {
+  const name = url.searchParams.keys().next();
+
+  if (name.done) {
+    return;
+  }
+
+  throw new LamedError(
+    "invalid_argument",
+    `Unknown query parameter "${previewKey(name.value)}". Delete does not support query parameters.`,
+  );
+}
+
+async function rejectDeleteBody(req: IncomingMessage): Promise<void> {
+  const body = await readLimitedBody(req);
+
+  if (body.length === 0) {
+    return;
+  }
+
+  throw new LamedError("invalid_argument", "Delete does not accept a request body.");
+}
+
 function readCreateOnly(req: IncomingMessage): boolean {
   const header = req.headers["if-none-match"];
 
@@ -279,7 +305,6 @@ function writeJson(
   if (status === 204) {
     res.writeHead(status, {
       "cache-control": "no-store",
-      "content-length": "0",
       ...headers,
     });
     res.end(() => {

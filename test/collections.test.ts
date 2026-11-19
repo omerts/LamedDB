@@ -407,6 +407,7 @@ describe("collections API", () => {
 
     expect(removed.status).toBe(204);
     expect(removed.headers.get("content-type")).toBeNull();
+    expect(removed.headers.get("content-length")).toBeNull();
     expect(await removed.text()).toBe("");
 
     await expect(orders.get("ord_123")).rejects.toMatchObject({
@@ -541,6 +542,58 @@ describe("collections API", () => {
     await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
       id: "ord_123",
       version: 2,
+      data: { status: "paid" },
+    });
+  });
+
+  it("rejects a query parameter or a body on delete and leaves the record unchanged", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+    await db.collection("orders").put("ord_123", { status: "paid" });
+
+    const conditional = await fetch(
+      `${running?.url}/v1/collections/orders/records/ord_123?ifVersion=999`,
+      { method: "DELETE" },
+    );
+
+    expect(conditional.status).toBe(400);
+    await expect(conditional.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: 'Unknown query parameter "ifVersion". Delete does not support query parameters.',
+      },
+    });
+
+    const withBody = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ifVersion: 999 }),
+    });
+
+    expect(withBody.status).toBe(400);
+    await expect(withBody.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "Delete does not accept a request body.",
+      },
+    });
+
+    const plainBody = await fetch(`${running?.url}/v1/collections/orders/records/ord_123`, {
+      method: "DELETE",
+      headers: { "content-type": "text/plain" },
+      body: "ifVersion=999",
+    });
+
+    expect(plainBody.status).toBe(400);
+    await expect(plainBody.json()).resolves.toMatchObject({
+      error: {
+        code: "invalid_argument",
+        message: "Delete does not accept a request body.",
+      },
+    });
+
+    await expect(db.collection("orders").get("ord_123")).resolves.toEqual({
+      id: "ord_123",
+      version: 1,
       data: { status: "paid" },
     });
   });

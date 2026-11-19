@@ -35,6 +35,11 @@ function assertJsonContentType(contentType: string | undefined): void {
   }
 }
 
+/** Read the body with the same 1 MiB cap as `readJsonBody`, without requiring JSON. */
+export function readLimitedBody(req: IncomingMessage): Promise<Buffer> {
+  return readLimited(req);
+}
+
 function readLimited(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];

@@ -89,4 +89,4 @@ Errors are JSON: `{ "error": { "code", "message", "details?" } }`. Codes include
 
 ## Not in this slice
 
-`If-Match` / `ifVersion`, idempotency keys, event emit, tenancy and credentials, queries, and a durable store are follow-ups. Sending `If-Match` or `Idempotency-Key` on create or put is rejected. Sending `If-Match`, `If-None-Match`, or `Idempotency-Key` on delete is rejected. Those preconditions are not silently ignored.
+`If-Match` / `ifVersion`, idempotency keys, event emit, tenancy and credentials, queries, and a durable store are follow-ups. Sending `If-Match` or `Idempotency-Key` on create or put is rejected. Sending `If-Match`, `If-None-Match`, or `Idempotency-Key` on delete is rejected. A query parameter or a request body on delete is rejected too. Those preconditions are not silently ignored.
