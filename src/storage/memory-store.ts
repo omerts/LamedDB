@@ -53,6 +53,9 @@ export class MemoryStore implements Store {
 
   private readonly idempotency = new Map<string, Map<string, IdempotencyEntry>>();
 
+  /** Highest storedAt in each collection. Keeps expiry a prefix without scanning. */
+  private readonly idempotencyNewestAt = new Map<string, number>();
+
   private nextRevision = 1;
 
   private readonly now: () => number;
@@ -106,6 +109,7 @@ export class MemoryStore implements Store {
     }
 
     this.idempotency.delete(name);
+    this.idempotencyNewestAt.delete(name);
     this.records.delete(name);
     this.versions.delete(name);
 
@@ -253,6 +257,21 @@ export class MemoryStore implements Store {
     return inner;
   }
 
+  private storedAtFor(collection: string, now: number): number {
+    const newest = this.idempotencyNewestAt.get(collection);
+
+    // A backwards clock would record this key with an earlier timestamp than a key
+    // already in the map. That later key could then expire while the earlier one
+    // is still live, and stopping at the first live key would leave it behind.
+    // Pin it to the newest stored time so now < storedAt keeps the current keys
+    // live together and the next expiry is still a prefix.
+    if (newest !== undefined && now < newest) {
+      return newest;
+    }
+
+    return now;
+  }
+
   private readNow(): number {
     const now = this.now();
 
@@ -290,26 +309,35 @@ export class MemoryStore implements Store {
       this.idempotency.set(collection, keys);
     }
 
-    const expired: string[] = [];
-
+    // Stored times do not decrease, so expired keys are a prefix. Stop at the first live one.
     for (const [key, entry] of keys) {
-      if (isExpired(entry.storedAt, now, this.idempotencyTtlMs)) {
-        expired.push(key);
+      if (!isExpired(entry.storedAt, now, this.idempotencyTtlMs)) {
+        break;
       }
+
+      keys.delete(key);
     }
 
-    for (const key of expired) {
-      keys.delete(key);
+    if (keys.size === 0) {
+      this.idempotencyNewestAt.delete(collection);
     }
 
     // Delete first so a reused key is stored as the newest, not left in its old position.
     keys.delete(idempotency.key);
+
+    if (keys.size === 0) {
+      this.idempotencyNewestAt.delete(collection);
+    }
+
+    const storedAt = this.storedAtFor(collection, now);
+
     keys.set(idempotency.key, {
       fingerprint: idempotency.fingerprint,
       created,
       record: snapshotRecord(record),
-      storedAt: now,
+      storedAt,
     });
+    this.idempotencyNewestAt.set(collection, storedAt);
 
     while (keys.size > this.maxIdempotencyKeys) {
       const oldest = keys.keys().next().value;

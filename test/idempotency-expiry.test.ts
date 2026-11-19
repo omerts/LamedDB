@@ -213,6 +213,123 @@ describe("idempotency key expiry", () => {
     expect(replay.status).toBe(201);
     expect(replay.body).toEqual(first.body);
   });
+
+  it("leaves every live key in place when none of them has expired", async () => {
+    const clock = useClock(0);
+    const { db } = await open(running, {
+      now: clock.now,
+      idempotencyTtlMs: TTL_MS,
+      maxIdempotencyKeys: 10,
+    });
+
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    const first = await orders.put("a", { status: "open" }, { idempotencyKey: "key-a" });
+    const second = await orders.put("b", { status: "open" }, { idempotencyKey: "key-b" });
+
+    clock.at(TTL_MS - 1);
+
+    const added = await orders.put("c", { status: "open" }, { idempotencyKey: "key-c" });
+    const replayFirst = await orders.put("a", { status: "open" }, { idempotencyKey: "key-a" });
+    const replaySecond = await orders.put("b", { status: "open" }, { idempotencyKey: "key-b" });
+
+    expect(added.version).toBe(1);
+    expect(replayFirst).toEqual(first);
+    expect(replaySecond).toEqual(second);
+  });
+
+  it("drops every expired key at the front and keeps the first live key", async () => {
+    const clock = useClock(0);
+    const { db } = await open(running, {
+      now: clock.now,
+      idempotencyTtlMs: TTL_MS,
+      maxIdempotencyKeys: 10,
+    });
+
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+
+    await orders.put("a", { status: "old" }, { idempotencyKey: "key-a" });
+    await orders.put("b", { status: "old" }, { idempotencyKey: "key-b" });
+
+    clock.at(10);
+
+    const live = await orders.put("c", { status: "live" }, { idempotencyKey: "key-c" });
+
+    clock.at(TTL_MS);
+
+    const added = await orders.put("d", { status: "new" }, { idempotencyKey: "key-d" });
+    const kept = await orders.put("c", { status: "live" }, { idempotencyKey: "key-c" });
+    const firstExpired = await orders.put("a", { status: "old" }, { idempotencyKey: "key-a" });
+    const secondExpired = await orders.put("b", { status: "old" }, { idempotencyKey: "key-b" });
+
+    expect(kept).toEqual(live);
+    expect(added.version).toBe(1);
+    expect(firstExpired.version).toBe(2);
+    expect(secondExpired.version).toBe(2);
+  });
+
+  it("does not expire a key stored after the clock jumps backwards before the earlier key", async () => {
+    const clock = useClock(1_000);
+    const service = new CollectionService(
+      new MemoryStore({ now: clock.now, idempotencyTtlMs: TTL_MS, maxIdempotencyKeys: 10 }),
+    );
+
+    await service.createCollection("orders", { fields: { status: "string" } });
+
+    const first = await service.putRecord("orders", "a", { status: "open" }, { idempotencyKey: "key-a" });
+
+    clock.at(0);
+
+    const second = await service.putRecord("orders", "b", { status: "open" }, { idempotencyKey: "key-b" });
+
+    clock.at(1_000);
+
+    const replayFirst = await service.putRecord(
+      "orders",
+      "a",
+      { status: "open" },
+      { idempotencyKey: "key-a" },
+    );
+    const replaySecond = await service.putRecord(
+      "orders",
+      "b",
+      { status: "open" },
+      { idempotencyKey: "key-b" },
+    );
+
+    expect(replayFirst.record).toEqual(first.record);
+    expect(replaySecond.record).toEqual(second.record);
+
+    clock.at(1_000 + TTL_MS - 1);
+
+    expect(
+      (await service.putRecord("orders", "a", { status: "open" }, { idempotencyKey: "key-a" })).record,
+    ).toEqual(first.record);
+    expect(
+      (await service.putRecord("orders", "b", { status: "open" }, { idempotencyKey: "key-b" })).record,
+    ).toEqual(second.record);
+
+    clock.at(1_000 + TTL_MS);
+
+    const expiredSecond = await service.putRecord(
+      "orders",
+      "b",
+      { status: "open" },
+      { idempotencyKey: "key-b" },
+    );
+    const expiredFirst = await service.putRecord(
+      "orders",
+      "a",
+      { status: "open" },
+      { idempotencyKey: "key-a" },
+    );
+
+    expect(expiredSecond.record.version).toBe(2);
+    expect(expiredFirst.record.version).toBe(2);
+  });
 });
 
 describe("idempotency key cap", () => {
@@ -327,6 +444,32 @@ describe("idempotency key cap", () => {
     expect(kept).toEqual(live);
     expect(added.version).toBe(1);
     expect(expired.version).toBe(2);
+  });
+
+  it("still drops the oldest live key when the cap is full and nothing has expired", async () => {
+    const clock = useClock(0);
+    const { db } = await open(running, {
+      now: clock.now,
+      maxIdempotencyKeys: 2,
+      idempotencyTtlMs: TTL_MS,
+    });
+
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    const oldest = await orders.put("a", { status: "open" }, { idempotencyKey: "key-a" });
+    const kept = await orders.put("b", { status: "open" }, { idempotencyKey: "key-b" });
+
+    clock.at(TTL_MS - 1);
+
+    const added = await orders.put("c", { status: "open" }, { idempotencyKey: "key-c" });
+    const stillThere = await orders.put("b", { status: "open" }, { idempotencyKey: "key-b" });
+    const evicted = await orders.put("a", { status: "open" }, { idempotencyKey: "key-a" });
+
+    expect(oldest.version).toBe(1);
+    expect(stillThere).toEqual(kept);
+    expect(added.version).toBe(1);
+    expect(evicted.version).toBe(2);
   });
 
   it("keeps at most the default number of keys per collection", async () => {
