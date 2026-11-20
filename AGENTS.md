@@ -65,3 +65,13 @@ Service and HTTP code depend on the `Store` interface in `src/storage/store.ts` 
 Applies to: `src/collections/service.ts`, `src/http/server.ts`, `src/storage/store.ts`, `src/storage/memory-store.ts`.
 
 Why: LamedDB can later swap layouts and tiers without touching callers.
+
+### Per-request state is bounded and cheap to trim
+
+State that grows with each client request, such as idempotency keys, has a configurable limit, and trimming it on the write path stops at the first live entry. Records, collections, and version counters are unbounded by design, and this rule does not apply to them. The limit is `LIMITS.maxIdempotencyKeysPerCollection` and the lifetime is `LIMITS.idempotencyTtlMs`, both read by `parseMemoryStoreOptions` (`MemoryStoreOptions.maxIdempotencyKeys`, `MemoryStoreOptions.idempotencyTtlMs`). How a bad option is rejected is covered by `Don't trust the types`. `remember` (`src/storage/memory-store.ts`) keeps one map per collection in insertion order. It moves a reused key to the end, drops expired keys from the front, and stops at the first live key, then drops from the front while the map is over the cap. `storedAtFor` pins a new timestamp to `idempotencyNewestAt` when `now` is earlier than a timestamp already kept, so expiry stays a prefix and that early break still drops every expired key. The trim runs inside `Store.putRecord`. Replay, a failed write, and what delete does with keys are `All storage goes through Store`. Tests for this rule cover a full store (the collection is at its key cap and nothing has expired), expired entries, and a backwards clock (`test/idempotency-expiry.test.ts`). The other failure paths for a change are `Edge cases ship with the feature`.
+
+- Time comes from the injected `now` (`MemoryStoreOptions.now`), never raw `Date.now()` in logic. `readNow` calls that function. `parseMemoryStoreOptions` passes `Date.now` only when the caller omits `now`.
+
+Applies to: `src/storage/memory-store.ts`, `src/validate.ts`, `test/**`.
+
+Why: each stored key keeps a copy of the document, so a client that sends a new key on every write can grow process memory while the records stay small. On https://github.com/omerts/LamedDB/pull/8, Qodo found "Server memory grows without bound per write". That finding was deferred and became https://github.com/omerts/LamedDB/issues/9. On https://github.com/omerts/LamedDB/pull/10, Qodo found that every keyed put scanned all stored keys. The fix evicts from the front and stops at the first live entry.
