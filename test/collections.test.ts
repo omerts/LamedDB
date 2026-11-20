@@ -2,18 +2,23 @@ import { request as httpRequest } from "node:http";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { LamedDB, LamedError, listen, type RunningServer } from "../src/index.js";
+import { LamedDB, LamedError, type RunningServer } from "../src/index.js";
 import { LIMITS, parseCollectionName, parseRecordId } from "../src/validate.js";
+import { startTestServer, TEST_API_KEY } from "./helpers.js";
 
 const paidAt = "2026-11-19T08:15:00.000Z";
+let fetch: typeof globalThis.fetch = globalThis.fetch;
 
 describe("collections API", () => {
   let running: RunningServer | undefined;
   let db: LamedDB;
 
   beforeEach(async () => {
-    running = await listen();
-    db = new LamedDB({ baseUrl: running.url });
+    const started = await startTestServer();
+
+    running = started.server;
+    db = started.db;
+    fetch = started.fetch;
   });
 
   afterEach(async () => {
@@ -872,6 +877,7 @@ function requestWithBody(
         method,
         headers: {
           ...headers,
+          authorization: `Bearer ${TEST_API_KEY}`,
           "content-length": Buffer.byteLength(body),
         },
       },
