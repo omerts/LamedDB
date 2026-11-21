@@ -14,7 +14,7 @@ import {
   type RunningServer,
   type Store,
 } from "../src/index.js";
-import { apiKeysFromEnv, LIMITS, parseApiKeys } from "../src/validate.js";
+import { apiKeysFromEnv, isValidApiKey, LIMITS, parseApiKeys } from "../src/validate.js";
 import { startTestServer } from "./helpers.js";
 
 const API_KEY = "super-secret-key-9f3a";
@@ -47,16 +47,19 @@ describe("API key authentication", () => {
       message: "At least one API key is required. The server refuses to start without apiKeys.",
     });
     await expect(blank).rejects.toMatchObject({
-      message: "API keys must be non-empty strings with no whitespace.",
+      message:
+        "API keys must be non-empty printable ASCII strings with no spaces or control characters.",
     });
     await expect(whitespace).rejects.toMatchObject({
-      message: "API keys must be non-empty strings with no whitespace.",
+      message:
+        "API keys must be non-empty printable ASCII strings with no spaces or control characters.",
     });
     await expect(notAnArray).rejects.toMatchObject({
       message: "At least one API key is required. The server refuses to start without apiKeys.",
     });
     await expect(notAString).rejects.toMatchObject({
-      message: "API keys must be non-empty strings with no whitespace.",
+      message:
+        "API keys must be non-empty printable ASCII strings with no spaces or control characters.",
     });
     expect(() => parseApiKeys(undefined)).toThrow(LamedError);
     expect(parseApiKeys([API_KEY, OTHER_KEY])).toEqual([API_KEY, OTHER_KEY]);
@@ -337,6 +340,46 @@ describe("API key authentication", () => {
     }
   });
 
+  it("rejects spaces, control characters, and non-ASCII keys, and a valid key still works", async () => {
+    const baseUrl = "http://127.0.0.1:9";
+    const rejected = ["good key", "good\u0001key", "good€key"];
+    const serverMessage =
+      "API keys must be non-empty printable ASCII strings with no spaces or control characters.";
+    const sdkMessage = "apiKey must be printable ASCII with no spaces or control characters.";
+
+    for (const apiKey of rejected) {
+      expect(isValidApiKey(apiKey)).toBe(false);
+
+      const parsed = errorFrom(() => parseApiKeys([apiKey]));
+      const constructed = errorFrom(() => new LamedDB({ baseUrl, apiKey }));
+
+      expect(parsed).toMatchObject({
+        code: "invalid_argument",
+        status: 400,
+        message: serverMessage,
+      });
+      expect(constructed).toMatchObject({
+        code: "invalid_argument",
+        status: 400,
+        message: sdkMessage,
+      });
+      expect(parsed.message).not.toContain(apiKey);
+      expect(constructed.message).not.toContain(apiKey);
+    }
+
+    expect(isValidApiKey("dev-key")).toBe(true);
+    expect(parseApiKeys(["dev-key"])).toEqual(["dev-key"]);
+    expect(() => new LamedDB({ baseUrl, apiKey: "dev-key" })).not.toThrow();
+
+    const started = await startTestServer({ apiKeys: ["dev-key"] });
+
+    running.push(started.server);
+
+    await expect(started.db.admin.createCollection("orders")).resolves.toMatchObject({
+      name: "orders",
+    });
+  });
+
   it("does not log the API key or the Authorization header when a later call fails", async () => {
     const started = await startTestServer({ apiKeys: [API_KEY], store: explodingStore() });
 
@@ -410,6 +453,20 @@ describe("CLI startup", () => {
     }
   }, 20_000);
 });
+
+function errorFrom(run: () => unknown): LamedError {
+  try {
+    run();
+  } catch (error) {
+    if (error instanceof LamedError) {
+      return error;
+    }
+
+    throw error;
+  }
+
+  throw new Error("expected an invalid_argument error");
+}
 
 async function expectUnauthenticated(response: Response, secrets: readonly string[]): Promise<void> {
   const text = await response.text();

@@ -6,7 +6,7 @@ import type {
   PutOptions,
   RecordEnvelope,
 } from "../types.js";
-import { isPlainObject, parseCollectionName, parsePutOptions } from "../validate.js";
+import { isPlainObject, isValidApiKey, parseCollectionName, parsePutOptions } from "../validate.js";
 
 export interface LamedDBOptions {
   baseUrl: string;
@@ -35,6 +35,13 @@ export class LamedDB {
 
     if (typeof options.apiKey !== "string" || options.apiKey.trim().length === 0) {
       throw new LamedError("invalid_argument", "apiKey is required.");
+    }
+
+    if (!isValidApiKey(options.apiKey)) {
+      throw new LamedError(
+        "invalid_argument",
+        "apiKey must be printable ASCII with no spaces or control characters.",
+      );
     }
 
     this.transport = {
