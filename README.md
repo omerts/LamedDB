@@ -4,7 +4,7 @@ LamedDB is a cloud-native database that adapts how it stores, serves, and stream
 
 The pilot is a TypeScript SDK and HTTP API for single-region workflows such as orders, tickets, and activity.
 
-This slice stores data in memory behind a `Store` interface. A durable engine can replace that adapter later. There is no authentication yet. The server binds to `127.0.0.1` unless `HOST` is set.
+This slice stores data in memory behind a `Store` interface. A durable engine can replace that adapter later. Every request needs an API key. The server binds to `127.0.0.1` unless `HOST` is set, and it refuses to start when `LAMEDDB_API_KEYS` is missing.
 
 ## Requirements
 
@@ -25,12 +25,14 @@ npm test
 ## Run
 
 ```bash
-npm run dev
+LAMEDDB_API_KEYS=dev-key npm run dev
 ```
 
 The server listens on `http://127.0.0.1:8080`. Override the bind address with `HOST` and `PORT`.
 
-`npm run build` writes `dist/`. `npm start` runs the compiled server.
+Set `LAMEDDB_API_KEYS` to one or more comma-separated API keys before starting the server. Surrounding spaces are ignored. `LAMEDDB_API_KEYS=key-one,key-two` accepts either key. The server refuses to start without the variable, including when it binds to localhost. Send `Authorization: Bearer <key>` on every request. A missing or wrong key is `401` `unauthenticated` with `WWW-Authenticate: Bearer`. The message is the same in both cases and does not include the key.
+
+`npm run build` writes `dist/`. `npm start` runs the compiled server and requires the same `LAMEDDB_API_KEYS`.
 
 ## API
 
@@ -47,7 +49,9 @@ A stored key expires after 24 hours. Set `IDEMPOTENCY_TTL_MS` to a positive numb
 ```ts
 import { LamedDB } from "lameddb";
 
-const db = new LamedDB({ baseUrl: "http://127.0.0.1:8080" });
+const baseUrl = "http://127.0.0.1:8080";
+const apiKey = "dev-key";
+const db = new LamedDB({ baseUrl, apiKey });
 
 await db.admin.createCollection("orders", {
   fields: { status: "string", createdAt: "timestamp", totalCents: "integer" },
@@ -77,25 +81,31 @@ await db.admin.deleteCollection("orders");
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/v1/collections \
+  -H 'authorization: Bearer dev-key' \
   -H 'content-type: application/json' \
   -d '{"name":"orders","fields":{"status":"string","createdAt":"timestamp","totalCents":"integer"}}'
 
 curl -sS -X PUT http://127.0.0.1:8080/v1/collections/orders/records/ord_123 \
+  -H 'authorization: Bearer dev-key' \
   -H 'content-type: application/json' \
   -H 'if-none-match: *' \
   -H 'idempotency-key: ord_123-paid' \
   -d '{"status":"paid","totalCents":12900,"createdAt":"2026-11-19T08:15:00.000Z"}'
 
-curl -sS -D - http://127.0.0.1:8080/v1/collections/orders/records/ord_123
+curl -sS -D - http://127.0.0.1:8080/v1/collections/orders/records/ord_123 \
+  -H 'authorization: Bearer dev-key'
 
 curl -sS -D - -X PUT http://127.0.0.1:8080/v1/collections/orders/records/ord_123 \
+  -H 'authorization: Bearer dev-key' \
   -H 'content-type: application/json' \
   -H 'if-match: "1"' \
   -d '{"status":"refunded","totalCents":0,"createdAt":"2026-11-19T08:15:00.000Z"}'
 
-curl -sS -D - -o /dev/null -X DELETE http://127.0.0.1:8080/v1/collections/orders/records/ord_123
+curl -sS -D - -o /dev/null -X DELETE http://127.0.0.1:8080/v1/collections/orders/records/ord_123 \
+  -H 'authorization: Bearer dev-key'
 
-curl -sS -D - -o /dev/null -X DELETE http://127.0.0.1:8080/v1/collections/orders
+curl -sS -D - -o /dev/null -X DELETE http://127.0.0.1:8080/v1/collections/orders \
+  -H 'authorization: Bearer dev-key'
 ```
 
 | SDK | HTTP | Result |
@@ -106,8 +116,8 @@ curl -sS -D - -o /dev/null -X DELETE http://127.0.0.1:8080/v1/collections/orders
 | `collection.get(id)` | `GET /v1/collections/{name}/records/{id}` | `200` and the record with `ETag`, or `404` |
 | `collection.delete(id)` | `DELETE /v1/collections/{name}/records/{id}` | `204` with no body, or `404` |
 
-Errors are JSON: `{ "error": { "code", "message", "details?" } }`. Codes include `invalid_argument` (400), `not_found` (404), `already_exists` (409), `idempotency_conflict` (409), and `precondition_failed` (412).
+Errors are JSON: `{ "error": { "code", "message", "details?" } }`. Codes include `invalid_argument` (400), `unauthenticated` (401), `not_found` (404), `already_exists` (409), `idempotency_conflict` (409), and `precondition_failed` (412).
 
 ## Not in this slice
 
-Idempotency for collection creation, event emit, tenancy and credentials, queries, and a durable store are follow-ups. `If-Match` on create, get, and delete is rejected. `Idempotency-Key` on create, get, and delete is rejected. `If-None-Match` on get and delete is rejected. A query parameter is rejected on every method. A request body on get or delete is rejected. Those inputs are not silently ignored.
+Idempotency for collection creation, event emit, per-key permissions, key rotation, tenancy, queries, and a durable store are follow-ups. `If-Match` on create, get, and delete is rejected. `Idempotency-Key` on create, get, and delete is rejected. `If-None-Match` on get and delete is rejected. A query parameter is rejected on every method. A request body on get or delete is rejected. Those inputs are not silently ignored.

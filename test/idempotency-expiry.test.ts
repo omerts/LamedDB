@@ -4,12 +4,14 @@ import {
   CollectionService,
   LamedDB,
   MemoryStore,
-  listen,
   type MemoryStoreOptions,
   type RunningServer,
   type Store,
 } from "../src/index.js";
 import { LIMITS, idempotencyRetentionFromEnv } from "../src/validate.js";
+import { startTestServer, TEST_API_KEY } from "./helpers.js";
+
+let fetch: typeof globalThis.fetch = globalThis.fetch;
 
 const TTL_MS = 1_000;
 
@@ -653,6 +655,7 @@ describe("deleting a collection drops its keys", () => {
     let calls = 0;
     const db = new LamedDB({
       baseUrl: "http://127.0.0.1:9",
+      apiKey: TEST_API_KEY,
       fetch: async () => {
         calls += 1;
         throw new Error("delete should not be sent");
@@ -918,15 +921,16 @@ function useClock(start: number): { now: () => number; at: (value: number) => vo
 }
 
 async function open(running: RunningServer[], options: MemoryStoreOptions = {}): Promise<OpenServer> {
-  const server = await listen({ store: new MemoryStore(options) });
+  const started = await startTestServer({ store: new MemoryStore(options) });
 
-  running.push(server);
+  running.push(started.server);
+  fetch = started.fetch;
 
   return {
-    db: new LamedDB({ baseUrl: server.url }),
-    baseUrl: server.url,
+    db: started.db,
+    baseUrl: started.server.url,
     record: (collection: string, id: string) =>
-      `${server.url}/v1/collections/${collection}/records/${id}`,
+      `${started.server.url}/v1/collections/${collection}/records/${id}`,
   };
 }
 

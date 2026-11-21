@@ -1,10 +1,11 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import { CollectionService } from "../collections/service.js";
 import { LamedError } from "../errors.js";
 import { MemoryStore } from "../storage/memory-store.js";
 import type { Store } from "../storage/store.js";
-import { isPlainObject, parseIdempotencyKey } from "../validate.js";
+import { isPlainObject, parseApiKeys, parseIdempotencyKey } from "../validate.js";
 import { OversizedBodyError, readJsonBody, readLimitedBody } from "./body.js";
 
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
@@ -15,6 +16,11 @@ export interface ListenOptions {
   host?: string;
   store?: Store;
   service?: CollectionService;
+  /**
+   * At least one API key. The server refuses to start when this is missing or empty.
+   * There is no switch that turns authentication off.
+   */
+  apiKeys: readonly string[];
 }
 
 export interface RunningServer {
@@ -30,13 +36,15 @@ interface HttpResult {
   headers?: Record<string, string>;
 }
 
-export async function listen(options: ListenOptions = {}): Promise<RunningServer> {
-  const service = options.service ?? new CollectionService(options.store ?? new MemoryStore());
+export async function listen(options: ListenOptions): Promise<RunningServer> {
+  const settings = requireListenOptions(options);
+  const apiKeys = parseApiKeys(settings.apiKeys);
+  const service = settings.service ?? new CollectionService(settings.store ?? new MemoryStore());
   const server = createServer((req, res) => {
-    void handleRequest(req, res, service);
+    void handleRequest(req, res, service, apiKeys);
   });
-  const host = options.host ?? "127.0.0.1";
-  const port = options.port ?? 0;
+  const host = settings.host ?? "127.0.0.1";
+  const port = settings.port ?? 0;
 
   await new Promise<void>((resolve, reject) => {
     const onError = (error: Error): void => {
@@ -81,20 +89,27 @@ async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   service: CollectionService,
+  apiKeys: readonly string[],
 ): Promise<void> {
   try {
-    const result = await route(req, service);
+    const result = await route(req, service, apiKeys);
     writeJson(res, result.status, result.body, result.headers);
   } catch (error) {
     if (error instanceof LamedError) {
       const headers: Record<string, string> = {};
+      const closeAfterResponse = error instanceof OversizedBodyError || error.code === "unauthenticated";
 
-      if (error instanceof OversizedBodyError) {
+      if (error.code === "unauthenticated") {
+        headers["www-authenticate"] = "Bearer";
+      }
+
+      if (closeAfterResponse) {
         headers.connection = "close";
       }
 
       writeJson(res, error.status, error.toJSON(), headers, () => {
-        if (error instanceof OversizedBodyError && !req.destroyed) {
+        // The 401 is already flushed. Drop the socket so an unread body cannot stall it.
+        if (closeAfterResponse && !req.destroyed) {
           req.destroy();
         }
       });
@@ -108,7 +123,13 @@ async function handleRequest(
   }
 }
 
-async function route(req: IncomingMessage, service: CollectionService): Promise<HttpResult> {
+async function route(
+  req: IncomingMessage,
+  service: CollectionService,
+  apiKeys: readonly string[],
+): Promise<HttpResult> {
+  requireBearer(req, apiKeys);
+
   const method = req.method ?? "GET";
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const path = url.pathname;
@@ -249,6 +270,68 @@ async function route(req: IncomingMessage, service: CollectionService): Promise<
   rejectUnexpectedQuery(url);
 
   return methodNotAllowed(["GET", "PUT", "DELETE"]);
+}
+
+function requireListenOptions(options: ListenOptions): ListenOptions {
+  if (options === undefined || options === null || typeof options !== "object" || Array.isArray(options)) {
+    throw new LamedError(
+      "invalid_argument",
+      "At least one API key is required. The server refuses to start without apiKeys.",
+    );
+  }
+
+  return options;
+}
+
+function requireBearer(req: IncomingMessage, apiKeys: readonly string[]): void {
+  const values = rawHeaderValues(req, "authorization");
+
+  if (values.length !== 1) {
+    throw unauthenticated();
+  }
+
+  const value = values[0];
+
+  if (value === undefined || !bearerMatches(value, apiKeys)) {
+    throw unauthenticated();
+  }
+}
+
+function unauthenticated(): LamedError {
+  return new LamedError("unauthenticated", "A valid API key is required.");
+}
+
+function bearerMatches(header: string, apiKeys: readonly string[]): boolean {
+  const prefix = "Bearer ";
+
+  if (!header.startsWith(prefix)) {
+    return false;
+  }
+
+  const token = header.slice(prefix.length);
+
+  if (token.length === 0 || /\s/.test(token)) {
+    return false;
+  }
+
+  return apiKeyMatches(token, apiKeys);
+}
+
+function apiKeyMatches(token: string, apiKeys: readonly string[]): boolean {
+  // Digests are equal length, so timingSafeEqual can compare them.
+  // Every configured key is checked so the match position does not change the timing.
+  const tokenHash = createHash("sha256").update(token).digest();
+  let matched = false;
+
+  for (const apiKey of apiKeys) {
+    const keyHash = createHash("sha256").update(apiKey).digest();
+
+    if (timingSafeEqual(tokenHash, keyHash)) {
+      matched = true;
+    }
+  }
+
+  return matched;
 }
 
 function parseCreateCollectionBody(body: unknown): { name: string; fields: unknown } {

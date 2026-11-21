@@ -6,16 +6,18 @@ import type {
   PutOptions,
   RecordEnvelope,
 } from "../types.js";
-import { isPlainObject, parseCollectionName, parsePutOptions } from "../validate.js";
+import { isPlainObject, isValidApiKey, parseCollectionName, parsePutOptions } from "../validate.js";
 
 export interface LamedDBOptions {
   baseUrl: string;
+  apiKey: string;
   fetch?: typeof fetch;
 }
 
 interface Transport {
   baseUrl: string;
   fetch: typeof fetch;
+  apiKey: string;
 }
 
 export class LamedDB {
@@ -31,9 +33,21 @@ export class LamedDB {
       throw new LamedError("invalid_argument", "baseUrl is required.");
     }
 
+    if (typeof options.apiKey !== "string" || options.apiKey.trim().length === 0) {
+      throw new LamedError("invalid_argument", "apiKey is required.");
+    }
+
+    if (!isValidApiKey(options.apiKey)) {
+      throw new LamedError(
+        "invalid_argument",
+        "apiKey must be printable ASCII with no spaces or control characters.",
+      );
+    }
+
     this.transport = {
       baseUrl: options.baseUrl.replace(/\/$/, ""),
       fetch: options.fetch ?? globalThis.fetch,
+      apiKey: options.apiKey,
     };
     this.admin = {
       createCollection: (name, spec) => createCollection(this.transport, name, spec),
@@ -138,7 +152,10 @@ async function requestJson(
   body?: unknown,
   headers: Record<string, string> = {},
 ): Promise<unknown> {
-  const requestHeaders: Record<string, string> = { ...headers };
+  const requestHeaders: Record<string, string> = {
+    ...headers,
+    authorization: `Bearer ${transport.apiKey}`,
+  };
 
   if (body !== undefined) {
     requestHeaders["content-type"] = "application/json";

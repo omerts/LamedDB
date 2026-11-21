@@ -1,5 +1,6 @@
 export const ERROR_CODES = {
   invalidArgument: "invalid_argument",
+  unauthenticated: "unauthenticated",
   notFound: "not_found",
   alreadyExists: "already_exists",
   idempotencyConflict: "idempotency_conflict",
@@ -12,6 +13,7 @@ export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
 
 const STATUS_BY_CODE: Record<ErrorCode, number> = {
   invalid_argument: 400,
+  unauthenticated: 401,
   not_found: 404,
   already_exists: 409,
   idempotency_conflict: 409,

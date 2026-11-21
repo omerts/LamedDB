@@ -195,6 +195,69 @@ export function idempotencyRetentionFromEnv(env: {
   };
 }
 
+const API_KEY_REQUIRED =
+  "At least one API key is required. The server refuses to start without apiKeys.";
+
+const API_KEY_CHARACTERS =
+  "API keys must be non-empty printable ASCII strings with no spaces or control characters.";
+
+/** Printable ASCII, excluding space and control characters. */
+const API_KEY_PATTERN = /^[\x21-\x7e]+$/;
+
+/** True only for a non-empty printable ASCII key, with no spaces or control characters. */
+export function isValidApiKey(key: string): boolean {
+  return typeof key === "string" && API_KEY_PATTERN.test(key);
+}
+
+/**
+ * Runtime check for the keys `listen` accepts.
+ * An empty list is rejected, so there is no way to start without authentication.
+ */
+export function parseApiKeys(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new LamedError("invalid_argument", API_KEY_REQUIRED);
+  }
+
+  const keys: string[] = [];
+
+  for (const key of value) {
+    if (typeof key !== "string" || !isValidApiKey(key)) {
+      throw new LamedError("invalid_argument", API_KEY_CHARACTERS);
+    }
+
+    keys.push(key);
+  }
+
+  return keys;
+}
+
+/** Read `LAMEDDB_API_KEYS` as a comma-separated list. Missing and blank values fail. */
+export function apiKeysFromEnv(env: { LAMEDDB_API_KEYS?: unknown }): readonly string[] {
+  if (env === null || typeof env !== "object") {
+    throw new LamedError("invalid_argument", "Environment must be an object.");
+  }
+
+  const raw = env.LAMEDDB_API_KEYS;
+
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    throw new LamedError(
+      "invalid_argument",
+      "LAMEDDB_API_KEYS is required. Set it to one or more comma-separated API keys. The server refuses to start without them.",
+    );
+  }
+
+  const keys = raw.split(",").map((part) => part.trim());
+
+  if (keys.some((key) => key.length === 0)) {
+    throw new LamedError(
+      "invalid_argument",
+      "LAMEDDB_API_KEYS contains an empty key. Pass a comma-separated list of non-empty keys.",
+    );
+  }
+
+  return parseApiKeys(keys);
+}
+
 function defaultRetention(now: () => number): MemoryStoreRetention {
   return {
     now,

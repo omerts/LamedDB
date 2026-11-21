@@ -2,16 +2,22 @@ import { connect } from "node:net";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CollectionService, LamedDB, MemoryStore, listen, type PutOptions, type RunningServer } from "../src/index.js";
+import { CollectionService, LamedDB, MemoryStore, type PutOptions, type RunningServer } from "../src/index.js";
 import { LIMITS, parseIdempotencyKey, parsePutOptions } from "../src/validate.js";
+import { startTestServer, TEST_API_KEY } from "./helpers.js";
+
+let fetch: typeof globalThis.fetch = globalThis.fetch;
 
 describe("idempotency keys", () => {
   let running: RunningServer | undefined;
   let db: LamedDB;
 
   beforeEach(async () => {
-    running = await listen();
-    db = new LamedDB({ baseUrl: running.url });
+    const started = await startTestServer();
+
+    running = started.server;
+    db = started.db;
+    fetch = started.fetch;
   });
 
   afterEach(async () => {
@@ -640,6 +646,7 @@ describe("idempotency keys", () => {
     let calls = 0;
     const watched = new LamedDB({
       baseUrl: running?.url ?? "",
+      apiKey: TEST_API_KEY,
       fetch: async (input, init) => {
         calls += 1;
 
@@ -701,9 +708,11 @@ describe("idempotency keys", () => {
       throw new Error("Server is not listening.");
     }
 
+    const authed = raw.replace("\r\n", `\r\nauthorization: Bearer ${TEST_API_KEY}\r\n`);
+
     return new Promise((resolve, reject) => {
       const socket = connect({ host: "127.0.0.1", port }, () => {
-        socket.write(raw);
+        socket.write(authed);
       });
       const chunks: Buffer[] = [];
 
