@@ -139,11 +139,12 @@ async function route(
   // Liveness probe for load balancers and uptime checks. This is the only route that skips the key.
   // Only GET skips it. Every other method on /health needs a key, then gets 405.
   if (path === HEALTH_PATH && method === "GET") {
+    // Body first: it is the one 400 that closes the socket, so a bad header plus a body also closes it.
+    rejectUnreadBody(req);
     rejectUnexpectedQuery(url);
     rejectIfMatch(req);
     rejectIdempotencyKey(req);
     rejectIfNoneMatch(req, "If-None-Match is not supported on this request.");
-    rejectUnreadBody(req);
 
     return { status: 200, body: { status: "ok" } };
   }
