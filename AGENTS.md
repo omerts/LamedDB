@@ -52,7 +52,7 @@ Why: JavaScript callers and raw HTTP clients bypass TypeScript.
 
 ### Every error gets a response
 
-Errors return the `LamedError.toJSON()` envelope from `src/errors.ts` and the status on `LamedError.status`. The shape is `{ "error": { "code": ErrorCode, "message": string, "details"?: object } }`. `details` is omitted when absent. Codes and statuses: `invalid_argument` 400, `unauthenticated` 401, `not_found` 404, `already_exists` 409, `idempotency_conflict` 409, `precondition_failed` 412, `method_not_allowed` 405, `internal` 500. `handleRequest` in `src/http/server.ts` writes that JSON for a `LamedError` and for any other thrown value (`internal` / 500) through `writeJson` before it returns. An oversized body (`OversizedBodyError` in `src/http/body.ts`) pauses the request, `writeJson` sends the 400, and the socket is destroyed only in the `writeJson` flush callback. A missing or wrong API key is `unauthenticated` / 401 with `WWW-Authenticate: Bearer`, and that response is flushed before the socket is destroyed. New routes must sit behind the bearer check in `route()` and have a test that a missing key returns `401` `unauthenticated` before the handler reads a body or changes storage.
+Errors return the `LamedError.toJSON()` envelope from `src/errors.ts` and the status on `LamedError.status`. The shape is `{ "error": { "code": ErrorCode, "message": string, "details"?: object } }`. `details` is omitted when absent. Codes and statuses: `invalid_argument` 400, `unauthenticated` 401, `not_found` 404, `already_exists` 409, `idempotency_conflict` 409, `precondition_failed` 412, `method_not_allowed` 405, `internal` 500. `handleRequest` in `src/http/server.ts` writes that JSON for a `LamedError` and for any other thrown value (`internal` / 500) through `writeJson` before it returns. An oversized body (`OversizedBodyError` in `src/http/body.ts`) pauses the request, `writeJson` sends the 400, and the socket is destroyed only in the `writeJson` flush callback. A missing or wrong API key is `unauthenticated` / 401 with `WWW-Authenticate: Bearer`, and that response is flushed before the socket is destroyed. New routes must sit behind the bearer check in `route()` (the one exception is `GET /health`, which is public on purpose so load balancers and uptime checks can call it) and have a test that a missing key returns `401` `unauthenticated` before the handler reads a body or changes storage.
 
 Applies to: `src/http/server.ts` (`handleRequest`, `writeJson`), `src/http/body.ts`, `src/errors.ts`.
 
@@ -75,3 +75,14 @@ State that grows with each client request, such as idempotency keys, has a confi
 Applies to: `src/storage/memory-store.ts`, `src/validate.ts`, `test/**`.
 
 Why: each stored key keeps a copy of the document, so a client that sends a new key on every write can grow process memory while the records stay small. On https://github.com/omerts/LamedDB/pull/8, Qodo found "Server memory grows without bound per write". That finding was deferred and became https://github.com/omerts/LamedDB/issues/9. On https://github.com/omerts/LamedDB/pull/10, Qodo found that every keyed put scanned all stored keys. The fix evicts from the front and stops at the first live entry.
+
+## Quality gate
+
+Apply this to every task. Use Qodo Reviewer on uncommitted changes (staged and unstaged), or Review Resolver on a PR. Give the review the task requirements and the decisions made.
+
+- Investigate every finding against the code and the requirements. Reject invalid ones with evidence.
+- Fix every valid High and Medium finding, of any type (Bug, Rule violation, Requirement gap).
+- Do not change code for Low findings. Report every Low finding for the owner's attention, including unchanged Low Rule violations.
+- After fixes, run typecheck, tests and build, then rerun the review. Repeat until no valid High or Medium finding remains. Stop after 3 rounds.
+- For a PR, the latest completed Qodo review must cover the latest commit.
+- Report the task as NOT DONE, with the blocker and what is needed, if a valid High or Medium finding is unresolved, checks or review are incomplete, or the loop stalls.

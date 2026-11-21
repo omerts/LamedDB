@@ -132,6 +132,34 @@ describe("GET /health", () => {
     }
   });
 
+  it("a bad header plus a body on GET /health returns 400 and closes the connection", async () => {
+    const test = await startTestServer();
+    running = test.server;
+    const headers = ['if-match: "1"', "if-none-match: *", "idempotency-key: k"];
+
+    for (const header of headers) {
+      for (const auth of ["", `authorization: Bearer ${TEST_API_KEY}\r\n`]) {
+        const raw = `GET /health HTTP/1.1\r\nhost: x\r\n${auth}${header}\r\ncontent-length: 5\r\n\r\nhello`;
+        const result = await rawRequestInfo(test.server.port, raw);
+
+        expect(result.reply.split("\r\n")[0], raw).toContain("400");
+        expect(result.reply.toLowerCase()).toContain("connection: close");
+        expect(result.closed, raw).toBe(true);
+      }
+    }
+  });
+
+  it("POST /health with an incomplete body and no key gets an early 401 and closes", async () => {
+    const test = await startTestServer();
+    running = test.server;
+    const raw = "POST /health HTTP/1.1\r\nhost: x\r\ncontent-length: 1000\r\n\r\npartial";
+    const result = await rawRequestInfo(test.server.port, raw);
+
+    expect(result.reply.split("\r\n")[0]).toContain("401");
+    expect(result.closed).toBe(true);
+    expect(result.ms).toBeLessThan(1000);
+  });
+
   it("a plain GET /health with content-length: 0 is still 200", async () => {
     const url = await start();
     const port = Number(new URL(url).port);
@@ -142,23 +170,44 @@ describe("GET /health", () => {
   });
 });
 
-function rawRequest(port: number, raw: string): Promise<string> {
+async function rawRequest(port: number, raw: string): Promise<string> {
+  return (await rawRequestInfo(port, raw)).reply;
+}
+
+/** Send raw bytes. `closed` is true when the server ended the connection before the timeout. */
+function rawRequestInfo(
+  port: number,
+  raw: string,
+  waitMs = 1500,
+): Promise<{ reply: string; closed: boolean; ms: number }> {
   return new Promise((resolve, reject) => {
+    const started = Date.now();
+    let data = "";
+    let done = false;
+    const finish = (closed: boolean): void => {
+      if (done) {
+        return;
+      }
+
+      done = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ reply: data, closed, ms: Date.now() - started });
+    };
     const socket = connect(port, "127.0.0.1", () => {
       socket.write(raw);
     });
-    let data = "";
+    const timer = setTimeout(() => {
+      finish(false);
+    }, waitMs);
 
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => {
       data += chunk;
     });
     socket.on("close", () => {
-      resolve(data);
+      finish(true);
     });
     socket.on("error", reject);
-    setTimeout(() => {
-      socket.destroy();
-    }, 1500);
   });
 }
