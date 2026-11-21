@@ -8,6 +8,7 @@ import type { Store } from "../storage/store.js";
 import { isPlainObject, parseApiKeys, parseIdempotencyKey } from "../validate.js";
 import { OversizedBodyError, readJsonBody, readLimitedBody } from "./body.js";
 
+const HEALTH_PATH = "/health";
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
 const COLLECTION_PATH = /^\/v1\/collections\/([^/]+)$/;
 
@@ -97,7 +98,10 @@ async function handleRequest(
   } catch (error) {
     if (error instanceof LamedError) {
       const headers: Record<string, string> = {};
-      const closeAfterResponse = error instanceof OversizedBodyError || error.code === "unauthenticated";
+      const closeAfterResponse =
+        error instanceof OversizedBodyError ||
+        error instanceof UnreadBodyError ||
+        error.code === "unauthenticated";
 
       if (error.code === "unauthenticated") {
         headers["www-authenticate"] = "Bearer";
@@ -128,11 +132,27 @@ async function route(
   service: CollectionService,
   apiKeys: readonly string[],
 ): Promise<HttpResult> {
-  requireBearer(req, apiKeys);
-
   const method = req.method ?? "GET";
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const path = url.pathname;
+
+  // Liveness probe for load balancers and uptime checks. This is the only route that skips the key.
+  // Only GET skips it. Every other method on /health needs a key, then gets 405.
+  if (path === HEALTH_PATH && method === "GET") {
+    rejectUnexpectedQuery(url);
+    rejectIfMatch(req);
+    rejectIdempotencyKey(req);
+    rejectIfNoneMatch(req, "If-None-Match is not supported on this request.");
+    rejectUnreadBody(req);
+
+    return { status: 200, body: { status: "ok" } };
+  }
+
+  requireBearer(req, apiKeys);
+
+  if (path === HEALTH_PATH) {
+    return methodNotAllowed(["GET"]);
+  }
 
   if (path === "/v1/collections") {
     rejectUnexpectedQuery(url);
@@ -431,6 +451,24 @@ function rejectUnexpectedQuery(url: URL): void {
     "invalid_argument",
     `Unknown query parameter "${previewKey(name.value)}".`,
   );
+}
+
+/** A body was sent to a route that never reads one. The socket is closed after the 400. */
+class UnreadBodyError extends LamedError {
+  constructor(method: string) {
+    super("invalid_argument", `${method} does not accept a request body.`);
+    this.name = "UnreadBodyError";
+  }
+}
+
+/** Reject a body without reading it, so an unauthenticated caller cannot make the server buffer one. */
+function rejectUnreadBody(req: IncomingMessage): void {
+  const length = req.headers["content-length"];
+  const hasLength = length !== undefined && !/^0+$/.test(length.trim());
+
+  if (hasLength || req.headers["transfer-encoding"] !== undefined) {
+    throw new UnreadBodyError("GET");
+  }
 }
 
 async function rejectUnexpectedBody(req: IncomingMessage, method: string): Promise<void> {

@@ -32,6 +32,8 @@ The server listens on `http://127.0.0.1:8080`. Override the bind address with `H
 
 Set `LAMEDDB_API_KEYS` to one or more comma-separated API keys before starting the server. Surrounding spaces are ignored. `LAMEDDB_API_KEYS=key-one,key-two` accepts either key. The server refuses to start without the variable, including when it binds to localhost. Send `Authorization: Bearer <key>` on every request. A missing or wrong key is `401` `unauthenticated` with `WWW-Authenticate: Bearer`. The message is the same in both cases and does not include the key.
 
+`GET /health` is the one route that needs no key. It returns `200` with `{"status":"ok"}` and nothing else, so load balancers and uptime checks can call it. `/health` rejects `If-Match`, `If-None-Match`, `Idempotency-Key`, a query parameter and a request body with `400`. Any other method on `/health` needs a key and returns `405`.
+
 `npm run build` writes `dist/`. `npm start` runs the compiled server and requires the same `LAMEDDB_API_KEYS`.
 
 ## API
