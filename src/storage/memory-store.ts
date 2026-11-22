@@ -272,13 +272,12 @@ export class MemoryStore implements Store {
       throw new LamedError("not_found", `Collection "${input.collection}" does not exist.`);
     }
 
-    const matching: RecordEnvelope[] = [];
+    // Filter, sort and slice the stored records, and copy only the page that is returned.
+    const matching: StoredRecord[] = [];
 
     for (const stored of this.records.get(input.collection)?.values() ?? []) {
-      const record = cloneRecord(stored);
-
-      if (matchesFilters(record, input.filters)) {
-        matching.push(record);
+      if (matchesFilters(stored, input.filters)) {
+        matching.push(stored);
       }
     }
 
@@ -288,7 +287,7 @@ export class MemoryStore implements Store {
     const remaining = after === undefined ? matching : matching.filter((record) => isAfter(record, after, input.sort));
 
     return {
-      records: remaining.slice(0, input.limit),
+      records: remaining.slice(0, input.limit).map(cloneRecord),
       hasMore: remaining.length > input.limit,
     };
   }

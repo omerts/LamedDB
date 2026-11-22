@@ -357,12 +357,15 @@ function readListQuery(url: URL): { limit?: string; cursor?: string; sort?: stri
     const match = FILTER_KEY.exec(key);
 
     if (!match || match[1] === undefined) {
+      // Only keys that look like an attempt at the filter syntax are "malformed". `filters` or `filterBy` are unknown.
+      const triedFilter = key === "filter" || key.startsWith("filter[") || key.startsWith("filter.");
+
       throw new LamedError(
         "invalid_argument",
-        key.startsWith("filter")
+        triedFilter
           ? `Malformed filter "${previewKey(key)}". Use filter[field]=value or filter[field][operator]=value.`
           : `Unknown query parameter "${previewKey(key)}".`,
-        { parameter: key.startsWith("filter") ? "filter" : "query" },
+        { parameter: triedFilter ? "filter" : "query" },
       );
     }
 

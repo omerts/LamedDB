@@ -158,6 +158,13 @@ function parseFilters(value: unknown, collection: CollectionState): RecordFilter
     const entry = value[name];
 
     if (isPlainObject(entry)) {
+      if (Object.keys(entry).length === 0) {
+        throw invalid(
+          `Filter "${preview(name)}" has no operator. Use a value, or an object such as { gte: 1 }. Operators: ${OPERATORS.join(", ")}.`,
+          "filter",
+        );
+      }
+
       for (const op of Object.keys(entry)) {
         clauses.push({ name, op, raw: entry[op] });
       }

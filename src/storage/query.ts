@@ -22,7 +22,12 @@ export interface ListPosition {
 }
 
 export function fieldValue(record: { id: string; data: JsonObject }, field: string): JsonValue | undefined {
-  return field === "id" ? record.id : record.data[field];
+  if (field === "id") {
+    return record.id;
+  }
+
+  // Own properties only: a field named `constructor` or `toString` must not read Object.prototype.
+  return Object.prototype.hasOwnProperty.call(record.data, field) ? record.data[field] : undefined;
 }
 
 export function matchesFilters(record: RecordEnvelope, filters: readonly RecordFilter[]): boolean {

@@ -2,7 +2,7 @@ import { request as httpRequest } from "node:http";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { CollectionService, LamedDB, LamedError, MemoryStore, type RunningServer } from "../src/index.js";
+import { CollectionService, LamedDB, LamedError, MemoryStore, type FieldType, type ListOptions, type RunningServer } from "../src/index.js";
 import { LIMITS } from "../src/validate.js";
 import { startTestServer, TEST_API_KEY, type TestServer } from "./helpers.js";
 
@@ -792,6 +792,163 @@ describe("list records", () => {
       await get("?filter[nope]=1");
 
       expect((await get("")).body.records.map((record: { version: number }) => record.version)).toEqual([1, 1, 1]);
+    });
+  });
+
+  describe("review fixes", () => {
+    it("reads only own properties, so fields named like Object.prototype members work", async () => {
+      await db.admin.createCollection("odd", {
+        fields: { constructor: "integer", toString: "string", valueOf: "integer", n: "integer" } as Record<string, FieldType>,
+      });
+      const odd = db.collection("odd");
+
+      await odd.put("a", { n: 1 });
+      await odd.put("b", { n: 2, constructor: 5, toString: "x" });
+      await odd.put("c", { n: 3, constructor: 7 });
+
+      const ids = async (query: string): Promise<string[]> => {
+        const response = await get(query, "/v1/collections/odd/records");
+
+        expect(response.status, query).toBe(200);
+
+        return response.body.records.map((record: { id: string }) => record.id);
+      };
+
+      expect(await ids("?filter[constructor]=null")).toEqual(["a"]);
+      expect(await ids("?filter[toString]=null")).toEqual(["a", "c"]);
+      expect(await ids("?filter[valueOf]=null")).toEqual(["a", "b", "c"]);
+      expect(await ids("?filter[constructor][gte]=6")).toEqual(["c"]);
+      expect(await ids("?filter[toString][prefix]=x")).toEqual(["b"]);
+
+      for (const field of ["constructor", "valueOf"]) {
+        const seen: string[] = [];
+        let cursor = "";
+
+        for (let page = 0; page < 5; page += 1) {
+          const response = await get(`?sort=${field}&limit=1${cursor}`, "/v1/collections/odd/records");
+
+          expect(response.status, `${field} page ${page}`).toBe(200);
+          seen.push(...response.body.records.map((record: { id: string }) => record.id));
+
+          if (response.body.nextCursor === null) {
+            break;
+          }
+
+          cursor = `&cursor=${response.body.nextCursor}`;
+        }
+
+        expect(seen, field).toEqual(["a", "b", "c"]);
+      }
+    });
+
+    it("rejects an empty operator object in the SDK and the service, and sends nothing", async () => {
+      let calls = 0;
+      const counting = new LamedDB({
+        baseUrl: running.url,
+        apiKey: TEST_API_KEY,
+        fetch: (input, init) => {
+          calls += 1;
+
+          return globalThis.fetch(input, init);
+        },
+      });
+
+      await seed(2);
+      await expect(counting.collection("orders").list({ filter: { status: {} } })).rejects.toMatchObject({
+        code: "invalid_argument",
+        message: expect.stringContaining("has no operator"),
+      });
+      expect(calls).toBe(0);
+
+      const service = new CollectionService(new MemoryStore());
+
+      await service.createCollection("orders", { fields: { status: "string" } });
+      await expect(service.listRecords("orders", { filter: { status: {} } })).rejects.toMatchObject({
+        code: "invalid_argument",
+        message: expect.stringContaining("has no operator"),
+      });
+    });
+
+    it("rejects an empty prefix and null with a range operator in the SDK before any request", async () => {
+      let calls = 0;
+      const counting = new LamedDB({
+        baseUrl: running.url,
+        apiKey: TEST_API_KEY,
+        fetch: (input, init) => {
+          calls += 1;
+
+          return globalThis.fetch(input, init);
+        },
+      });
+      const orders = counting.collection("orders");
+
+      const bad: NonNullable<ListOptions["filter"]>[] = [
+        { status: { prefix: "" } },
+        { status: { prefix: null } },
+        { totalCents: { gt: null } },
+        { totalCents: { gte: null } },
+        { createdAt: { lt: null } },
+        { createdAt: { lte: null } },
+      ];
+
+      for (const filter of bad) {
+        await expect(orders.list({ filter }), JSON.stringify(filter)).rejects.toMatchObject({ code: "invalid_argument" });
+      }
+
+      expect(calls).toBe(0);
+      // null is still fine where the server accepts it.
+      await expect(orders.list({ filter: { totalCents: { ne: null } } })).resolves.toMatchObject({ records: [] });
+    });
+
+    it("copies only the records it returns", async () => {
+      await seed(30);
+
+      const original = globalThis.structuredClone;
+      let copies = 0;
+
+      globalThis.structuredClone = ((value: unknown, options?: Parameters<typeof structuredClone>[1]) => {
+        copies += 1;
+
+        return original(value, options);
+      }) as typeof structuredClone;
+
+      try {
+        const page = await get("?limit=3&filter[totalCents][gte]=500&sort=-totalCents");
+
+        expect(page.body.records).toHaveLength(3);
+        expect(copies).toBe(3);
+      } finally {
+        globalThis.structuredClone = original;
+      }
+    });
+
+    it("returns Unknown query parameter for names that only start with filter", async () => {
+      for (const key of ["filters", "filterBy", "filtered[a]", "filterx"]) {
+        const response = await get(`?${key}=1`);
+
+        expect(response.status, key).toBe(400);
+        expect(response.body.error.message, key).toBe(`Unknown query parameter "${key}".`);
+      }
+
+      for (const key of ["filter", "filter.status", "filter[status"]) {
+        expect((await get(`?${key}=1`)).body.error.message, key).toMatch(/^Malformed filter/);
+      }
+    });
+
+    it("runs the README paging example", async () => {
+      await seed(5);
+
+      const options = { limit: 2, sort: "-amount", filter: { status: "open", amount: { gte: 100 } } };
+      const orders = db.collection("orders");
+      const page = await orders.list(options);
+
+      expect(page.records.map((record) => record.id)).toEqual(["ord_005", "ord_003"]);
+      expect(page.nextCursor).not.toBeNull();
+
+      const next = await orders.list({ ...options, cursor: page.nextCursor ?? "" });
+
+      expect(next.records.map((record) => record.id)).toEqual(["ord_001"]);
+      expect(next.nextCursor).toBeNull();
     });
   });
 });

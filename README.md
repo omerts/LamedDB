@@ -134,12 +134,17 @@ curl -sS -G http://127.0.0.1:8080/v1/collections/orders/records \
 ```
 
 ```ts
-const page = await db.collection("orders").list({
+const options = {
   limit: 20,
   sort: "-amount",
   filter: { status: "paid", amount: { gte: 1000 }, createdAt: { lt: "2026-12-01T00:00:00.000Z" } },
-});
-const next = await db.collection("orders").list({ /* same options */ cursor: page.nextCursor ?? undefined });
+};
+const page = await db.collection("orders").list(options);
+
+if (page.nextCursor !== null) {
+  // The next page needs the same filter and sort, plus the cursor.
+  const next = await db.collection("orders").list({ ...options, cursor: page.nextCursor });
+}
 ```
 
 The response is `{ "records": [{ "id", "version", "data" }], "nextCursor": string | null }`. `nextCursor` is `null` on the last page. An empty result is `{ "records": [], "nextCursor": null }`.

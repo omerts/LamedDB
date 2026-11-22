@@ -217,6 +217,7 @@ async function listRecords(
   };
 }
 
+const RANGE_OPERATORS = ["gt", "gte", "lt", "lte"];
 const FILTER_OPERATORS = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "prefix"];
 
 /** Check list options at runtime and build the query string. The server checks field names and types. */
@@ -273,6 +274,13 @@ function encodeListQuery(options: unknown): string {
       const entry = filter[field];
 
       if (isPlainObject(entry)) {
+        if (Object.keys(entry).length === 0) {
+          throw new LamedError(
+            "invalid_argument",
+            `Filter "${preview(field)}" has no operator. Use a value, or an object such as { gte: 1 }.`,
+          );
+        }
+
         for (const op of Object.keys(entry)) {
           if (!FILTER_OPERATORS.includes(op)) {
             throw new LamedError("invalid_argument", `Unknown filter operator "${preview(op)}" on "${preview(field)}".`);
@@ -310,8 +318,12 @@ function filterText(value: unknown, op: string, label: string): string {
     return value.map((item) => scalarText(item, label, true)).join(",");
   }
 
-  if (op === "prefix" && typeof value !== "string") {
-    throw new LamedError("invalid_argument", `Filter ${preview(label)} needs a string prefix.`);
+  if (op === "prefix" && (typeof value !== "string" || value.length === 0)) {
+    throw new LamedError("invalid_argument", `Filter ${preview(label)} needs a non-empty string prefix.`);
+  }
+
+  if (value === null && RANGE_OPERATORS.includes(op)) {
+    throw new LamedError("invalid_argument", `Filter ${preview(label)} cannot compare with null.`);
   }
 
   return scalarText(value, label, false);
