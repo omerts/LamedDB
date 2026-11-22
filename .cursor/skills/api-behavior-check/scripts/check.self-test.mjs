@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { judgeCase, parseHttpResponse, portFor, serverEnv, stopChild } from "./check.mjs";
+import { caseProcessProblems, judgeCase, parseHttpResponse, portFor, repoServerEntry, serverEnv, stopChild } from "./check.mjs";
 
 const runner = fileURLToPath(new URL("./check.mjs", import.meta.url));
 const failures = [];
@@ -27,16 +27,31 @@ function portChecks() {
 
 function envChecks() {
   const env = serverEnv(
-    { PATH: "/usr/bin", HOST: "0.0.0.0", PORT: "1", LAMEDDB_API_KEYS: "parent" },
-    { HOST: "evil", PORT: "9", LAMEDDB_API_KEYS: "stolen", OTHER: "kept" },
+    { PATH: "/usr/bin", HOST: "0.0.0.0", PORT: "1", LAMEDDB_API_KEYS: "parent", NODE_OPTIONS: "--parent" },
+    { HOST: "evil", PORT: "9", LAMEDDB_API_KEYS: "stolen", NODE_OPTIONS: "--require /tmp/pwn.js", LD_PRELOAD: "x.so", IDEMPOTENCY_TTL_MS: "1500" },
     { port: 4321, host: "127.0.0.1", key: "real" },
   );
 
   expect(env.HOST === "127.0.0.1", "HOST is forced after spec.env");
   expect(env.PORT === "4321", "PORT is forced after spec.env");
   expect(env.LAMEDDB_API_KEYS === "real", "API key is forced after spec.env");
-  expect(env.OTHER === "kept", "other spec.env entries are kept");
+  expect(env.IDEMPOTENCY_TTL_MS === "1500", "idempotency TTL is an allowed cases setting");
+  expect(env.NODE_OPTIONS === "--parent", "spec.env cannot replace NODE_OPTIONS");
+  expect(!Object.hasOwn(env, "LD_PRELOAD"), "spec.env cannot set LD_PRELOAD");
   expect(env.PATH === "/usr/bin", "parent env is kept");
+  expect(repoServerEntry().endsWith("/dist/cli.js"), `server entry is dist/cli.js, got ${repoServerEntry()}`);
+
+  const problems = caseProcessProblems({
+    serverEntry: "/tmp/evil.mjs",
+    env: { NODE_OPTIONS: "--require /tmp/pwn.js", LD_PRELOAD: "x.so", PATH: "/tmp", IDEMPOTENCY_MAX_KEYS: 3 },
+  });
+
+  expect(problems.some((line) => line.includes("serverEntry")), `serverEntry should be refused: ${problems.join("; ")}`);
+  expect(problems.some((line) => line.includes("NODE_OPTIONS")), `NODE_OPTIONS should be refused: ${problems.join("; ")}`);
+  expect(problems.some((line) => line.includes("LD_PRELOAD")), `LD_PRELOAD should be refused: ${problems.join("; ")}`);
+  expect(problems.some((line) => line.includes("env.PATH")), `PATH should be refused: ${problems.join("; ")}`);
+  expect(problems.some((line) => line.includes("IDEMPOTENCY_MAX_KEYS must be a string")), `non-string setting should be refused: ${problems.join("; ")}`);
+  expect(caseProcessProblems({ env: { IDEMPOTENCY_TTL_MS: "1500" } }).length === 0, "allowlisted env is accepted");
 }
 
 function parserChecks() {
@@ -237,51 +252,35 @@ async function httpChecks(dir) {
   }
 }
 
-async function killOnTimeoutCheck(dir) {
-  const pidFile = join(dir, "hang.pid");
-  const hang = join(dir, "hang.mjs");
-  writeFileSync(hang, 'import { writeFileSync } from "node:fs"; writeFileSync(process.env.HANG_PID_FILE, String(process.pid)); setInterval(() => {}, 1000);\n');
+async function refuseProcessControlCheck(dir) {
+  const pidFile = join(dir, "pwn.pid");
+  const evil = join(dir, "evil.mjs");
+  writeFileSync(evil, 'import { writeFileSync } from "node:fs"; writeFileSync(process.env.PWN_PID_FILE, String(process.pid));\n');
   writeFileSync(
-    join(dir, "hang-cases.json"),
+    join(dir, "pwn-cases.json"),
     JSON.stringify({
-      name: "hang",
-      serverEntry: hang,
+      name: "pwn",
+      serverEntry: evil,
+      env: { NODE_OPTIONS: "--import /tmp/pwn.mjs", LD_PRELOAD: "/tmp/libpwn.so" },
       cases: [{ id: "never", path: "/health", auth: "none", expect: { status: 200 } }],
     }),
   );
 
-  const run = await runRunner([join(dir, "hang-cases.json"), "--out", join(dir, "hang-out")], {
-    CHECK_START_ATTEMPTS: "2",
-    HANG_PID_FILE: pidFile,
-  });
-  let pid;
+  const run = await runRunner([join(dir, "pwn-cases.json"), "--out", join(dir, "pwn-out")], { PWN_PID_FILE: pidFile });
+  let started = false;
 
   try {
-    pid = Number(readFileSync(pidFile, "utf8"));
-    let alive = true;
-
-    for (let i = 0; i < 20; i++) {
-      try {
-        process.kill(pid, 0);
-      } catch {
-        alive = false;
-        break;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-
-    expect(run.code === 3, `startup timeout should exit 3, got ${run.code}\n${run.out}`);
-    expect(!alive, `server child ${pid} was still running after the runner exited`);
-  } finally {
-    if (pid) {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // Already stopped, which is the pass.
-      }
-    }
+    readFileSync(pidFile, "utf8");
+    started = true;
+  } catch {
+    started = false;
   }
+
+  expect(run.code === 2, `a cases file that picks the process should exit 2, got ${run.code}\n${run.out}`);
+  expect(run.out.includes("serverEntry is not allowed"), `refusal should name serverEntry\n${run.out}`);
+  expect(run.out.includes("env.NODE_OPTIONS is not allowed"), `refusal should name NODE_OPTIONS\n${run.out}`);
+  expect(run.out.includes("env.LD_PRELOAD is not allowed"), `refusal should name LD_PRELOAD\n${run.out}`);
+  expect(!started, "the cases file's serverEntry ran");
 }
 
 const dir = mkdtempSync(join(tmpdir(), "lameddb-check-"));
@@ -293,7 +292,7 @@ try {
   judgeChecks();
   await stopChildCheck();
   await httpChecks(dir);
-  await killOnTimeoutCheck(dir);
+  await refuseProcessControlCheck(dir);
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

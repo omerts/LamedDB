@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { createServer, connect } from "node:net";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // The cases run owns this process. Every exit path kills it, including timeouts and crashes.
 let child;
@@ -35,11 +35,58 @@ export function portFor(url) {
   return url.protocol === "https:" ? 443 : 80;
 }
 
-// spec.env is applied first. HOST, PORT, and the API key are the runner's, so a cases file cannot point the server elsewhere.
+// A cases file may only tune LamedDB. The runner sets the bind address and the API key.
+export const CASE_ENV_ALLOWLIST = ["IDEMPOTENCY_TTL_MS", "IDEMPOTENCY_MAX_KEYS"];
+
+export function repoRoot() {
+  return fileURLToPath(new URL("../../../../", import.meta.url));
+}
+
+export function repoServerEntry() {
+  return join(repoRoot(), "dist", "cli.js");
+}
+
+export function caseProcessProblems(spec) {
+  const problems = [];
+
+  if (spec != null && Object.prototype.hasOwnProperty.call(spec, "serverEntry")) {
+    problems.push("serverEntry is not allowed. The runner always starts dist/cli.js from the repo root.");
+  }
+
+  if (spec != null && Object.prototype.hasOwnProperty.call(spec, "env")) {
+    const env = spec.env;
+
+    if (env === null || typeof env !== "object" || Array.isArray(env)) {
+      problems.push("env must be an object of LamedDB settings.");
+    } else {
+      for (const key of Object.keys(env)) {
+        if (!CASE_ENV_ALLOWLIST.includes(key)) {
+          problems.push(`env.${key} is not allowed. Allowed: ${CASE_ENV_ALLOWLIST.join(", ")}.`);
+        } else if (typeof env[key] !== "string") {
+          problems.push(`env.${key} must be a string.`);
+        }
+      }
+    }
+  }
+
+  return problems;
+}
+
+// Only allowlisted settings are copied. HOST, PORT, and the API key stay the runner's.
 export function serverEnv(base, specEnv, forced) {
+  const allowed = {};
+
+  if (specEnv != null && typeof specEnv === "object" && !Array.isArray(specEnv)) {
+    for (const key of CASE_ENV_ALLOWLIST) {
+      if (typeof specEnv[key] === "string") {
+        allowed[key] = specEnv[key];
+      }
+    }
+  }
+
   return {
     ...base,
-    ...(specEnv ?? {}),
+    ...allowed,
     PORT: String(forced.port),
     HOST: forced.host,
     LAMEDDB_API_KEYS: forced.key,
@@ -178,9 +225,19 @@ async function main() {
     missing.push("no cases");
   }
 
-  if (missing.length) {
-    console.log("NEEDS INPUT - stop and ask the user before running:\n" + missing.map((m) => " - " + m).join("\n"));
-    writeFileSync(join(outDir, "needs-input.txt"), missing.join("\n") + "\n");
+  const refused = caseProcessProblems(spec);
+
+  if (missing.length || refused.length) {
+    if (missing.length) {
+      console.log("NEEDS INPUT - stop and ask the user before running:\n" + missing.map((m) => " - " + m).join("\n"));
+      writeFileSync(join(outDir, "needs-input.txt"), missing.join("\n") + "\n");
+    }
+
+    if (refused.length) {
+      console.error("REFUSED - the cases file must not control the server process:\n" + refused.map((m) => " - " + m).join("\n"));
+      writeFileSync(join(outDir, "refused.txt"), refused.join("\n") + "\n");
+    }
+
     finish(2);
   }
 
@@ -190,7 +247,7 @@ async function main() {
   let logs = "";
 
   if (!base) {
-    const entry = resolve(spec.serverEntry ?? "dist/cli.js");
+    const entry = repoServerEntry();
 
     if (!existsSync(entry)) {
       die(3, `${entry} not found. Run: npm ci && npm run build`);
@@ -198,6 +255,7 @@ async function main() {
 
     const port = await freePort();
     child = spawn(process.execPath, [entry], {
+      cwd: repoRoot(),
       env: serverEnv(process.env, spec.env, { port, host: "127.0.0.1", key }),
       stdio: ["ignore", "pipe", "pipe"],
     });

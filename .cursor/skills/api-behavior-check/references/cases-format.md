@@ -26,3 +26,5 @@
 - `fixture` steps run first with a valid key and must return 2xx or the run aborts (exit 3).
 - Options: `--out DIR`, `--base-url URL` (use an already running server; then pass `--key`), env `CHECK_COMMIT`.
 - Each case with missing expectations makes the runner exit 2 (`NEEDS INPUT`) before sending anything.
+- The runner always starts `dist/cli.js` from the repo root. `serverEntry` is not a field. Any value is exit 2.
+- `env` may only set `IDEMPOTENCY_TTL_MS` and `IDEMPOTENCY_MAX_KEYS`, both strings. Any other key, including `NODE_OPTIONS`, `NODE_*`, and `LD_*`, is exit 2. The runner sets `HOST`, `PORT`, and `LAMEDDB_API_KEYS`.

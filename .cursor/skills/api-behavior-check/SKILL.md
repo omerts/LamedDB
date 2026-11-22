@@ -12,7 +12,7 @@ metadata:
 Proves behavior over real HTTP, not just unit tests. Passing tests or a clean review is not evidence that this check ran. The evidence is the saved table and transcript.
 
 ## Project context
-- Server: `dist/cli.js`, built by `npm run build`. Env: `PORT`, `HOST` (default 127.0.0.1), `LAMEDDB_API_KEYS` (comma list, required).
+- Server: `dist/cli.js` from the repo root, built by `npm run build`. The runner sets `PORT`, `HOST` (`127.0.0.1`), and `LAMEDDB_API_KEYS`. A cases file cannot set `serverEntry`. Its `env` may only set `IDEMPOTENCY_TTL_MS` and `IDEMPOTENCY_MAX_KEYS`; any other key, including `NODE_OPTIONS`, is exit 2.
 - Storage is in-memory only (no data dir). A fresh server process is the fresh state. The runner starts one on a free port with a random key.
 - Auth: header `Authorization: Bearer <key>`. Only `GET /health` skips it.
 - Error body shape: `{"error":{"code","message","details?"}}`. Codes and statuses are in `src/errors.ts`: invalid_argument 400, unauthenticated 401, not_found 404, method_not_allowed 405, already_exists 409, idempotency_conflict 409, precondition_failed 412, internal 500. There is no `bad_request` code. A ticket that names one still has to be confirmed; do not rename it on your own.
