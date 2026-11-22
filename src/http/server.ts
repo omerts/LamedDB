@@ -438,7 +438,8 @@ function unauthenticated(): LamedError {
 function bearerMatches(header: string, apiKeys: readonly string[]): boolean {
   const prefix = "Bearer ";
 
-  if (!header.startsWith(prefix)) {
+  // The auth scheme is case-insensitive (RFC 9110 section 11.1). The token is compared as sent.
+  if (header.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) {
     return false;
   }
 

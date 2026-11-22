@@ -152,8 +152,10 @@ describe("API key authentication", () => {
 
     const cases = [
       `Basic ${API_KEY}`,
-      `bearer ${API_KEY}`,
-      `BEARER ${API_KEY}`,
+      `Bearers ${API_KEY}`,
+      `bearer${API_KEY}`,
+      `bearer ${API_KEY.toUpperCase()}`,
+      "bearer",
       "Bearer",
       `Bearer  ${API_KEY}`,
       `Bearer ${API_KEY.slice(0, API_KEY.length - 1)}`,
@@ -188,6 +190,29 @@ describe("API key authentication", () => {
     });
     expect(duplicate.body).not.toContain(API_KEY);
     expect(duplicate.headers).not.toContain(API_KEY);
+  });
+
+  it("accepts the Bearer scheme in any letter case and keeps the token case-sensitive", async () => {
+    const started = await startTestServer({ apiKeys: [API_KEY] });
+
+    running.push(started.server);
+    await started.db.admin.createCollection("orders");
+
+    for (const scheme of ["Bearer", "bearer", "BEARER", "bEaReR"]) {
+      const response = await fetch(`${started.server.url}/v1/collections/orders/records`, {
+        headers: { authorization: `${scheme} ${API_KEY}` },
+      });
+
+      expect(response.status).toBe(200);
+    }
+
+    for (const scheme of ["bearer", "BEARER"]) {
+      const response = await fetch(`${started.server.url}/v1/collections/orders/records`, {
+        headers: { authorization: `${scheme} ${OTHER_KEY}` },
+      });
+
+      await expectUnauthenticated(response, [API_KEY, OTHER_KEY]);
+    }
   });
 
   it("returns 401 before reading the body, the method, or the route", async () => {
