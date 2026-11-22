@@ -15,7 +15,7 @@ Proves behavior over real HTTP, not just unit tests. Passing tests or a clean re
 - Server: `dist/cli.js`, built by `npm run build`. Env: `PORT`, `HOST` (default 127.0.0.1), `LAMEDDB_API_KEYS` (comma list, required).
 - Storage is in-memory only (no data dir). A fresh server process is the fresh state. The runner starts one on a free port with a random key.
 - Auth: header `Authorization: Bearer <key>`. Only `GET /health` skips it.
-- Error body shape: `{"error":{"code","message","details?"}}`. Codes and statuses are in `src/errors.ts`: invalid_argument 400, unauthenticated 401, not_found 404, method_not_allowed 405, already_exists 409, idempotency_conflict 409, precondition_failed 412, internal 500. Note the 400 code is `invalid_argument`, not `bad_request`.
+- Error body shape: `{"error":{"code","message","details?"}}`. Codes and statuses are in `src/errors.ts`: invalid_argument 400, unauthenticated 401, not_found 404, method_not_allowed 405, already_exists 409, idempotency_conflict 409, precondition_failed 412, internal 500. There is no `bad_request` code. A ticket that names one still has to be confirmed; do not rename it on your own.
 - Repo rules: read `AGENTS.md` before changing code.
 
 ## Required inputs
@@ -26,10 +26,11 @@ Proves behavior over real HTTP, not just unit tests. Passing tests or a clean re
 1. Read the ticket. For each criterion that is about HTTP behavior, write one case. Include the bad and malformed requests the ticket names. Do not invent cases the ticket does not imply, except 1-2 normal-path regression cases.
 2. **Stop and ask the user (do not guess)** if any of these is true:
    - a case has no expected status in the ticket,
-   - an error case has no expected code or body in the ticket,
-   - the ticket's expected error code is not in `src/errors.ts` (name the mismatch and ask which is right),
+   - the ticket names an error code that is not in `src/errors.ts` (name the mismatch and ask which is right),
+   - the ticket gives a status but no code, and that status maps to more than one code in `src/errors.ts` (409 is both `already_exists` and `idempotency_conflict`),
    - the endpoint does not exist in `src/http/server.ts`,
    - the ticket is ambiguous (e.g. "401 or 400"): you may encode both as allowed statuses, but say so in your report.
+   When a ticket gives a status and no error code, and `src/errors.ts` maps that status to exactly one code, use that code and the standard body `{"error":{"code","message"}}`. Note the mapping in the report. Do not ask. A code the ticket names that `src/errors.ts` does not have is still a stop, even when that status has a single mapped code.
 3. Write the cases file to `evidence/<ticket>/cases.json` using the format in `references/cases-format.md`. A worked example is `references/example-cases-18.json`.
 4. Build and run:
    ```bash
