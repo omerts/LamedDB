@@ -121,6 +121,11 @@ describe("MCP query_records", () => {
     ["empty in list", { collection: "orders", filter: { id: { in: [] } } }],
     ["too many in values", { collection: "orders", filter: { id: { in: Array.from({ length: 21 }, (_, i) => `x${i}`) } } }],
     ["bad filter field name", { collection: "orders", filter: { "a b": "x" } }],
+    ["fractional filter value", { collection: "orders", filter: { amount: 1.5 } }],
+    ["fractional range value", { collection: "orders", filter: { amount: { gte: 1.5 } } }],
+    ["null range value", { collection: "orders", filter: { amount: { gte: null } } }],
+    ["comma inside an in value", { collection: "orders", filter: { status: { in: ["a,b"] } } }],
+    ["12 operators over two fields", { collection: "orders", filter: { a: { eq: 1, ne: 2, gt: 3, gte: 4, lt: 5, lte: 6 }, b: { eq: 1, ne: 2, gt: 3, gte: 4, lt: 5, lte: 6 } } }],
     ["bad sort", { collection: "orders", sort: "--amount" }],
     ["empty cursor", { collection: "orders", cursor: "" }],
   ])("rejects invalid input: %s", async (_name, args) => {
@@ -221,5 +226,9 @@ describe("MCP query_records", () => {
     expect(() => createMcpServer({ baseUrl: "http://x", apiKey: "has space" })).toThrow();
     expect(() => createMcpServer({ baseUrl: " ", apiKey: "k" })).toThrow();
     expect(() => createMcpServer({ baseUrl: "http://x", apiKey: "k", timeoutMs: 0 })).toThrow();
+    expect(() => createMcpServer({ baseUrl: "http://x", apiKey: "k", timeoutMs: 4_294_967_296 })).toThrow();
+    expect(() => createMcpServer({ baseUrl: "not a url", apiKey: "k" })).toThrow(/http\(s\) URL/);
+    expect(() => createMcpServer({ baseUrl: "ftp://x", apiKey: "k" })).toThrow(/http\(s\) URL/);
+    expect(() => createMcpServer({ baseUrl: "http://x", apiKey: " k " })).toThrow();
   });
 });

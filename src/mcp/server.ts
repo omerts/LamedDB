@@ -7,6 +7,8 @@ import { LIMITS, isValidApiKey } from "../validate.js";
 export const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_FILTER_CLAUSES = 10;
 const MAX_IN_VALUES = 20;
+/** Largest delay `AbortSignal.timeout` accepts (2^31 - 1 ms). */
+export const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export interface LamedMcpOptions {
   baseUrl: string;
@@ -16,18 +18,21 @@ export interface LamedMcpOptions {
   fetch?: typeof fetch;
 }
 
-const scalar = z.union([z.string(), z.number().finite(), z.null()]);
+// The SDK sends strings, safe integers and null only, so reject anything else here.
+const scalar = z.union([z.string(), z.number().int().safe(), z.null()]);
+const rangeScalar = z.union([z.string(), z.number().int().safe()]);
+const listScalar = z.union([z.string().refine((value) => !value.includes(","), "No commas inside a list value."), z.number().int().safe(), z.null()]);
 
 const operators = z
   .strictObject({
     eq: scalar,
     ne: scalar,
-    gt: scalar,
-    gte: scalar,
-    lt: scalar,
-    lte: scalar,
+    gt: rangeScalar,
+    gte: rangeScalar,
+    lt: rangeScalar,
+    lte: rangeScalar,
     prefix: z.string().min(1),
-    in: z.array(scalar).min(1).max(MAX_IN_VALUES),
+    in: z.array(listScalar).min(1).max(MAX_IN_VALUES),
   })
   .partial()
   .refine((value) => Object.keys(value).length > 0, { message: "Give at least one operator." });
@@ -43,11 +48,21 @@ export const queryRecordsInput = z.strictObject({
   sort: z.string().regex(/^-?[A-Za-z_][A-Za-z0-9_]{0,63}$/, "Use field or -field.").optional(),
   filter: z
     .record(fieldName, z.union([scalar, operators]))
-    .refine((value) => Object.keys(value).length <= MAX_FILTER_CLAUSES, {
-      message: `At most ${MAX_FILTER_CLAUSES} fields.`,
+    .refine((value) => countClauses(value) <= MAX_FILTER_CLAUSES, {
+      message: `At most ${MAX_FILTER_CLAUSES} filter clauses (each operator counts as one).`,
     })
     .optional(),
 });
+
+function countClauses(filter: Record<string, unknown>): number {
+  let clauses = 0;
+
+  for (const value of Object.values(filter)) {
+    clauses += typeof value === "object" && value !== null ? Object.keys(value).length : 1;
+  }
+
+  return clauses;
+}
 
 export type QueryRecordsInput = z.infer<typeof queryRecordsInput>;
 
@@ -63,9 +78,11 @@ export function createMcpServer(options: LamedMcpOptions): McpServer {
     throw new Error("apiKey is required and must be printable ASCII with no spaces.");
   }
 
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
-    throw new Error("timeoutMs must be a positive whole number.");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+    throw new Error(`timeoutMs must be a whole number from 1 to ${MAX_TIMEOUT_MS}.`);
   }
+
+  assertHttpUrl(options.baseUrl);
 
   const baseFetch = options.fetch ?? globalThis.fetch;
   const db = new LamedDB({
@@ -123,6 +140,20 @@ function describeFailure(error: unknown, target: string, timeoutMs: number): str
   }
 
   return `Could not reach LamedDB at ${target}. Check that the server is running and LAMEDDB_URL is right.`;
+}
+
+function assertHttpUrl(baseUrl: string): void {
+  let url: URL;
+
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error("baseUrl must be a full http(s) URL, such as http://127.0.0.1:8080.");
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("baseUrl must be a full http(s) URL, such as http://127.0.0.1:8080.");
+  }
 }
 
 function describeTarget(baseUrl: string): string {
