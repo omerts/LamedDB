@@ -169,6 +169,29 @@ Filterable fields are the declared fields, their aliases, and `id`. Values are r
 
 **Errors.** `401` without a key (checked first), `404` for a missing collection, `405` with `Allow: GET` for other methods (after the key check, whatever else the request carries), `400` for a bad `limit`, `cursor`, `sort`, or filter, or for a body, `If-Match`, `If-None-Match`, or `Idempotency-Key`. This is the only route that accepts query parameters, and only `limit`, `cursor`, `sort`, and `filter[...]`.
 
+## MCP tool
+
+`lameddb-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server with one read-only tool, `query_records`. It wraps `GET /v1/collections/{name}/records`, so an agent can page through records with filters and sort.
+
+```bash
+npm run build
+LAMEDDB_URL=http://127.0.0.1:8080 LAMEDDB_API_KEY=dev-key npm run start:mcp   # or: npm run mcp, or the lameddb-mcp bin
+```
+
+| Variable | Meaning |
+| --- | --- |
+| `LAMEDDB_API_KEY` | Required. Sent as the bearer key. Never printed or put in an error. |
+| `LAMEDDB_URL` | Server URL. Default `http://127.0.0.1:8080`. |
+| `LAMEDDB_TIMEOUT_MS` | Per-request timeout. Default `10000`. |
+
+MCP client config:
+
+```json
+{ "mcpServers": { "lameddb": { "command": "node", "args": ["dist/mcp/main.js"], "env": { "LAMEDDB_URL": "http://127.0.0.1:8080", "LAMEDDB_API_KEY": "dev-key" } } } }
+```
+
+`query_records` takes `collection` (required), `limit` (1 to 100), `cursor`, `sort` (`field` or `-field`) and `filter` (a field or alias mapped to a string, number or `null`, or to operators `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `in`, `prefix`). Example: `{"collection":"orders","filter":{"amount":{"gte":1000}},"sort":"-amount","limit":20}`. It returns `{ "records": [...], "nextCursor": string | null }` as JSON text. Unknown arguments, unknown operators, a bad collection name, `limit` outside 1 to 100, and non-scalar filter values are rejected before any request. Failures come back as tool errors (`isError`), not crashes: invalid input, a server that is down, `401` (bad key), `404` (unknown collection), a server-side `400`, and timeouts.
+
 ## Not in this slice
 
 Idempotency for collection creation, event emit, per-key permissions, key rotation, tenancy, indexes and richer queries (`OR`/`NOT`, sorting by strings or several fields, counts), and a durable store are follow-ups. Listing scans the collection on every page. `If-Match` on create, get, and delete is rejected. `Idempotency-Key` on create, get, and delete is rejected. `If-None-Match` on get and delete is rejected. A query parameter is rejected on every method, except `limit`, `cursor`, `sort`, and `filter[...]` on `GET /v1/collections/{name}/records`. A request body on get or delete is rejected. Those inputs are not silently ignored.

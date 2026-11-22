@@ -19,12 +19,21 @@
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "mcp": "tsx src/mcp/main.ts",
+    "start:mcp": "node dist/mcp/main.js"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^5.1.1"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "bin": {
+    "lameddb-mcp": "./dist/mcp/main.js"
   }
 }
