@@ -135,12 +135,12 @@ async function route(
   apiKeys: readonly string[],
 ): Promise<HttpResult> {
   const method = req.method ?? "GET";
-  const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  const path = url.pathname;
+  const url = readRequestUrl(req.url);
 
   // Liveness probe for load balancers and uptime checks. This is the only route that skips the key.
   // Only GET skips it. Every other method on /health needs a key, then gets 405.
-  if (path === HEALTH_PATH && method === "GET") {
+  // A target that does not parse is not /health, so it still needs a key.
+  if (url !== undefined && url.pathname === HEALTH_PATH && method === "GET") {
     // Body first: it is the one 400 that closes the socket, so a bad header plus a body also closes it.
     rejectUnreadBody(req);
     rejectUnexpectedQuery(url);
@@ -152,6 +152,12 @@ async function route(
   }
 
   requireBearer(req, apiKeys);
+
+  if (url === undefined) {
+    throw new LamedError("invalid_argument", "Request target is not a valid URL.");
+  }
+
+  const path = url.pathname;
 
   if (path === HEALTH_PATH) {
     return methodNotAllowed(["GET"]);
@@ -393,6 +399,22 @@ function requireListenOptions(options: ListenOptions): ListenOptions {
   }
 
   return options;
+}
+
+function readRequestUrl(raw: string | undefined): URL | undefined {
+  try {
+    return new URL(raw ?? "/", "http://127.0.0.1");
+  } catch (error) {
+    if (!isInvalidUrlError(error)) {
+      throw error;
+    }
+
+    return undefined;
+  }
+}
+
+function isInvalidUrlError(error: unknown): boolean {
+  return error instanceof TypeError && "code" in error && error.code === "ERR_INVALID_URL";
 }
 
 function requireBearer(req: IncomingMessage, apiKeys: readonly string[]): void {

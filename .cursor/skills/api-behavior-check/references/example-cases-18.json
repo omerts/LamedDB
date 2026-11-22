@@ -1,0 +1,40 @@
+{
+  "name": "issue-18-malformed-target",
+  "ticket": "https://github.com/omerts/LamedDB/issues/18",
+  "fixture": [
+    { "method": "POST", "path": "/v1/collections", "body": { "name": "orders", "fields": { "status": "string" } } },
+    { "method": "PUT", "path": "/v1/collections/orders/records/ord_1", "body": { "status": "paid" } }
+  ],
+  "cases": [
+    {
+      "id": "18-nokey", "criterion": "AC1",
+      "desc": "malformed target, no key: 401 (or clean 400), never 500, no internal error logged",
+      "method": "GET", "rawTarget": "http://[::1", "auth": "none",
+      "expect": { "status": [401, 400], "errorShape": true, "body": { "error.code": ["unauthenticated", "invalid_argument"] }, "serverLogMustNotMatch": ["TypeError", "Invalid URL", "ERR_INVALID_URL"] }
+    },
+    {
+      "id": "18-withkey", "criterion": "AC2",
+      "desc": "malformed target, valid key: 400. Ticket says code `bad_request`; repo's 400 code is `invalid_argument` (see ErrorCode in src/errors.ts)",
+      "method": "GET", "rawTarget": "http://[::1", "auth": "valid",
+      "expect": { "status": 400, "errorShape": true, "body": { "error.code": "invalid_argument" }, "serverLogMustNotMatch": ["TypeError", "Invalid URL", "ERR_INVALID_URL"] }
+    },
+    {
+      "id": "health-nokey", "criterion": "AC3",
+      "desc": "GET /health works without a key",
+      "method": "GET", "path": "/health", "auth": "none",
+      "expect": { "status": 200, "body": { "status": "ok" } }
+    },
+    {
+      "id": "list-nokey", "criterion": "regression",
+      "desc": "normal path, no key: 401 unauthenticated",
+      "method": "GET", "path": "/v1/collections/orders/records", "auth": "none",
+      "expect": { "status": 401, "errorShape": true, "body": { "error.code": "unauthenticated" } }
+    },
+    {
+      "id": "list-ok", "criterion": "regression",
+      "desc": "normal path, valid key: 200 with the fixture record",
+      "method": "GET", "path": "/v1/collections/orders/records",
+      "expect": { "status": 200, "body": { "records.0.id": "ord_1" } }
+    }
+  ]
+}
