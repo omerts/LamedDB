@@ -112,14 +112,58 @@ curl -sS -D - -o /dev/null -X DELETE http://127.0.0.1:8080/v1/collections/orders
 
 | SDK | HTTP | Result |
 | --- | --- | --- |
-| `admin.createCollection(name, spec?)` | `POST /v1/collections` | `201` and `{ name, fields }` |
+| `admin.createCollection(name, spec?)` | `POST /v1/collections` | `201` and `{ name, fields, aliases? }`. `spec` is `{ fields?, aliases? }` |
 | `admin.deleteCollection(name)` | `DELETE /v1/collections/{name}` | `204` with no body, or `404`. Drops the collection's records and idempotency keys |
 | `collection.put(id, data, options?)` | `PUT /v1/collections/{name}/records/{id}` | `201` on create, `200` on replace, body `{ id, version, data }`, `ETag: "<version>"`. `ifVersion` is `If-Match`. A miss is `412` |
 | `collection.get(id)` | `GET /v1/collections/{name}/records/{id}` | `200` and the record with `ETag`, or `404` |
 | `collection.delete(id)` | `DELETE /v1/collections/{name}/records/{id}` | `204` with no body, or `404` |
+| `collection.list({ limit?, cursor?, sort?, filter? })` | `GET /v1/collections/{name}/records` | `200` and `{ records, nextCursor }`, or `404`. See [List records](#list-records) |
 
 Errors are JSON: `{ "error": { "code", "message", "details?" } }`. Codes include `invalid_argument` (400), `unauthenticated` (401), `not_found` (404), `already_exists` (409), `idempotency_conflict` (409), and `precondition_failed` (412).
 
+## List records
+
+```bash
+curl -sS -G http://127.0.0.1:8080/v1/collections/orders/records \
+  -H 'authorization: Bearer dev-key' \
+  --data-urlencode 'limit=20' \
+  --data-urlencode 'sort=-amount' \
+  --data-urlencode 'filter[status]=paid' \
+  --data-urlencode 'filter[amount][gte]=1000' \
+  --data-urlencode 'filter[createdAt][lt]=2026-12-01T00:00:00.000Z'
+```
+
+```ts
+const page = await db.collection("orders").list({
+  limit: 20,
+  sort: "-amount",
+  filter: { status: "paid", amount: { gte: 1000 }, createdAt: { lt: "2026-12-01T00:00:00.000Z" } },
+});
+const next = await db.collection("orders").list({ /* same options */ cursor: page.nextCursor ?? undefined });
+```
+
+The response is `{ "records": [{ "id", "version", "data" }], "nextCursor": string | null }`. `nextCursor` is `null` on the last page. An empty result is `{ "records": [], "nextCursor": null }`.
+
+**Paging.** `limit` is a whole number from 1 to 100 and defaults to 50. A value above 100 is `400`, not clamped. The order is ascending `id` (plain string order), or the `sort` order. `cursor` is opaque: pass back the `nextCursor` of the previous page, with the same filters and sort. A cursor from another collection (or from a collection that was deleted and created again), or used with different filters or sort, is `400`. Each page re-reads the collection, so nothing is held between pages. A record that matches for the whole walk is returned exactly once, however other records are added, replaced, or deleted. A record added mid-walk is returned only if it sorts after the current position. When sorting by a field other than `id`, a record whose sort value changes mid-walk may be returned twice or skipped.
+
+**Filters.** `filter[field]=value` is equality. `filter[field][op]=value` uses an operator. Several clauses are ANDed, up to 10 per request, and the same field and operator cannot repeat.
+
+| Operator | Meaning | Notes |
+| --- | --- | --- |
+| `eq` | equal | the default |
+| `ne` | not equal | also matches null or missing values, unless the value is `null` |
+| `gt`, `gte`, `lt`, `lte` | range | integers by number, timestamps by time, strings by code unit. Never match null or missing, and cannot compare with `null` |
+| `in` | one of | comma-separated, 1 to 20 values, so a value cannot hold a comma. `in=` is one empty string. The SDK takes an array |
+| `prefix` | starts with | string fields only, not empty |
+
+Filterable fields are the declared fields, their aliases, and `id`. Values are read by the declared type: strings as is, integers as whole numbers, timestamps as UTC with milliseconds. The bare value `null` means "null or missing" (so the string `"null"` cannot be matched). An unknown field, an unknown operator, an operator that does not fit the type, a bad value, and a malformed key are `400`, and the message names the field or operator and lists the valid ones.
+
+**Aliases.** A collection can declare `aliases` when it is created, such as `{ fields: { totalCents: "integer" }, aliases: { amount: "totalCents" } }`. Callers can use `amount` in `filter` and `sort`. An alias cannot equal a declared field or `id`, and must point at a declared field. A bad alias is `400` and the collection is not created.
+
+**Sort.** `sort=field` ascending, `sort=-field` descending, one field. Sortable: `id`, and integer or timestamp fields (or their aliases). Missing and null values come first ascending and last descending. Ties are broken by ascending `id`.
+
+**Errors.** `401` without a key (checked first), `404` for a missing collection, `405` with `Allow: GET` for other methods (after the key check, whatever else the request carries), `400` for a bad `limit`, `cursor`, `sort`, or filter, or for a body, `If-Match`, `If-None-Match`, or `Idempotency-Key`. This is the only route that accepts query parameters, and only `limit`, `cursor`, `sort`, and `filter[...]`.
+
 ## Not in this slice
 
-Idempotency for collection creation, event emit, per-key permissions, key rotation, tenancy, queries, and a durable store are follow-ups. `If-Match` on create, get, and delete is rejected. `Idempotency-Key` on create, get, and delete is rejected. `If-None-Match` on get and delete is rejected. A query parameter is rejected on every method. A request body on get or delete is rejected. Those inputs are not silently ignored.
+Idempotency for collection creation, event emit, per-key permissions, key rotation, tenancy, indexes and richer queries (`OR`/`NOT`, sorting by strings or several fields, counts), and a durable store are follow-ups. Listing scans the collection on every page. `If-Match` on create, get, and delete is rejected. `Idempotency-Key` on create, get, and delete is rejected. `If-None-Match` on get and delete is rejected. A query parameter is rejected on every method, except `limit`, `cursor`, `sort`, and `filter[...]` on `GET /v1/collections/{name}/records`. A request body on get or delete is rejected. Those inputs are not silently ignored.

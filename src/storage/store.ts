@@ -1,4 +1,5 @@
-import type { CollectionInfo, FieldMap, JsonObject, RecordEnvelope } from "../types.js";
+import type { AliasMap, CollectionInfo, FieldMap, JsonObject, RecordEnvelope } from "../types.js";
+import type { ListPosition, RecordFilter, RecordSort } from "./query.js";
 
 /** One recorded attempt of a record put. The fingerprint identifies the request. */
 export interface IdempotentPut {
@@ -31,6 +32,25 @@ export interface PutRecordInput {
   idempotency?: IdempotentPut;
 }
 
+export interface ListRecordsInput {
+  collection: string;
+  /** The `revision` from the `getCollection` result. The list fails when that collection was replaced. */
+  collectionRevision: number;
+  /** Every clause must match. */
+  filters: readonly RecordFilter[];
+  sort: RecordSort;
+  /** Return only records strictly after this position in the sort order. */
+  after?: ListPosition;
+  /** Maximum records to return. */
+  limit: number;
+}
+
+export interface ListRecordsResult {
+  records: RecordEnvelope[];
+  /** True when at least one more matching record follows the returned ones. */
+  hasMore: boolean;
+}
+
 export interface PutRecordResult {
   created: boolean;
   record: RecordEnvelope;
@@ -60,11 +80,16 @@ export interface PutRecordResult {
  * at last version + 1.
  * `deleteCollection` removes the collection, its records, its version counters,
  * and its idempotency keys, and only those. A missing collection returns false.
+ * `listRecords` returns the matching records in the sort order (the sort field,
+ * then ascending id), strictly after `after`, at most `limit`, and says whether more
+ * follow. It reads one consistent snapshot per call and holds no state between calls,
+ * so a record that exists throughout a walk is returned exactly once. A missing
+ * collection, or one whose revision is not `collectionRevision`, throws not_found.
  * `getCollection` returns the current revision. `createCollection` does not
  * include that revision in the collection payload.
  */
 export interface Store {
-  createCollection(name: string, fields: FieldMap): Promise<CollectionInfo>;
+  createCollection(name: string, fields: FieldMap, aliases?: AliasMap): Promise<CollectionInfo>;
 
   getCollection(name: string): Promise<CollectionState | null>;
 
@@ -75,4 +100,6 @@ export interface Store {
   getRecord(collection: string, id: string): Promise<RecordEnvelope | null>;
 
   deleteRecord(collection: string, id: string): Promise<boolean>;
+
+  listRecords(input: ListRecordsInput): Promise<ListRecordsResult>;
 }

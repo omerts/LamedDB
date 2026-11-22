@@ -1,7 +1,10 @@
 import { LamedError } from "../errors.js";
+import { encodeCursor, parseListQuery } from "./list-query.js";
+import { fieldValue } from "../storage/query.js";
 import type { CollectionState, IdempotentPut, Store } from "../storage/store.js";
-import type { CollectionInfo, JsonObject, JsonValue, PutOptions, RecordEnvelope } from "../types.js";
+import type { CollectionInfo, JsonObject, JsonValue, ListResult, PutOptions, RecordEnvelope } from "../types.js";
 import {
+  parseAliasDeclarations,
   parseCollectionName,
   parseFieldDeclarations,
   parsePutOptions,
@@ -21,11 +24,15 @@ export interface PutOutcome {
 export class CollectionService {
   constructor(private readonly store: Store) {}
 
-  async createCollection(name: string, spec: { fields?: unknown } = {}): Promise<CollectionInfo> {
+  async createCollection(
+    name: string,
+    spec: { fields?: unknown; aliases?: unknown } = {},
+  ): Promise<CollectionInfo> {
     const collectionName = parseCollectionName(name);
     const fields = parseFieldDeclarations(spec.fields);
+    const aliases = parseAliasDeclarations(spec.aliases, fields);
 
-    return this.store.createCollection(collectionName, fields);
+    return this.store.createCollection(collectionName, fields, aliases);
   }
 
   async deleteCollection(name: string): Promise<void> {
@@ -94,6 +101,35 @@ export class CollectionService {
         `Record "${recordId}" was not found in collection "${collectionName}".`,
       );
     }
+  }
+
+  /**
+   * One page of records. `options` is the wire form: `limit`, `cursor`, `sort`, and `filter`
+   * as strings (see `parseListQuery`). Records come back in the sort order and the cursor
+   * holds the last position, so nothing is remembered between pages.
+   */
+  async listRecords(name: string, options?: unknown): Promise<ListResult> {
+    const collectionName = parseCollectionName(name);
+    const collection = await this.requireCollection(collectionName);
+    const query = parseListQuery(options, collection);
+
+    const page = await this.store.listRecords({
+      collection: collectionName,
+      collectionRevision: collection.revision,
+      filters: query.filters,
+      sort: query.sort,
+      after: query.after,
+      limit: query.limit,
+    });
+    const last = page.records[page.records.length - 1];
+
+    return {
+      records: page.records,
+      nextCursor:
+        page.hasMore && last !== undefined
+          ? encodeCursor(collection, query, { id: last.id, value: fieldValue(last, query.sort.field) ?? null })
+          : null,
+    };
   }
 
   private async requireCollection(name: string): Promise<CollectionState> {
