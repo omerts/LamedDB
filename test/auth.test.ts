@@ -262,6 +262,59 @@ describe("API key authentication", () => {
     await expect(started.db.admin.createCollection("tickets")).resolves.toMatchObject({ name: "tickets" });
   });
 
+  it("rejects a malformed request target without logging an internal error", async () => {
+    const started = await startTestServer({ apiKeys: [API_KEY] });
+
+    running.push(started.server);
+
+    await started.db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const created = await started.db.collection("orders").put("ord_123", { status: "open" });
+    const logged: unknown[][] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      logged.push(args);
+    });
+
+    const request = (authorization?: string): string => {
+      const lines = ["GET http://[::1 HTTP/1.1", "host: 127.0.0.1"];
+
+      if (authorization !== undefined) {
+        lines.push(`authorization: ${authorization}`);
+      }
+
+      lines.push("connection: close", "", "");
+
+      return lines.join("\r\n");
+    };
+
+    try {
+      const missing = await sendRaw(started.server.port, request());
+      const wrong = await sendRaw(started.server.port, request(`Bearer ${OTHER_KEY}`));
+      const valid = await sendRaw(started.server.port, request(`Bearer ${API_KEY}`));
+
+      expect(missing.status).toBe(401);
+      expect(missing.headers.toLowerCase()).toContain("www-authenticate: bearer");
+      expect(JSON.parse(missing.body)).toEqual({
+        error: { code: "unauthenticated", message: UNAUTHENTICATED_MESSAGE },
+      });
+      expect(wrong.status).toBe(401);
+      expect(JSON.parse(wrong.body)).toEqual({
+        error: { code: "unauthenticated", message: UNAUTHENTICATED_MESSAGE },
+      });
+      expect(valid.status).toBe(400);
+      expect(JSON.parse(valid.body)).toEqual({
+        error: { code: "invalid_argument", message: "Request target is not a valid URL." },
+      });
+      expect(missing.body + wrong.body + valid.body).not.toContain(API_KEY);
+      expect(missing.headers + wrong.headers + valid.headers).not.toContain(API_KEY);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(logged).toEqual([]);
+    await expect(started.db.collection("orders").get("ord_123")).resolves.toEqual(created);
+  });
+
   it("accepts every configured key and the SDK maps a wrong key to unauthenticated", async () => {
     const started = await startTestServer({ apiKeys: [API_KEY, OTHER_KEY] });
 
