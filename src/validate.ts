@@ -1,5 +1,5 @@
 import { LamedError } from "./errors.js";
-import type { FieldMap, FieldType, JsonObject, JsonValue } from "./types.js";
+import type { AliasMap, FieldMap, FieldType, JsonObject, JsonValue } from "./types.js";
 
 export const LIMITS = {
   maxBodyBytes: 1_048_576,
@@ -13,6 +13,12 @@ export const LIMITS = {
   idempotencyTtlMs: 86_400_000,
   /** Default maximum of live keys kept for one collection. */
   maxIdempotencyKeysPerCollection: 10_000,
+  maxAliases: 64,
+  defaultListLimit: 50,
+  maxListLimit: 100,
+  maxCursorLength: 512,
+  maxFilterClauses: 10,
+  maxInValues: 20,
 } as const;
 
 const COLLECTION_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,62}$/;
@@ -353,6 +359,68 @@ export function parseFieldDeclarations(fields: unknown): FieldMap {
 }
 
 /**
+ * Check alias declarations against the declared fields.
+ * An alias is a friendlier name for one declared field. It cannot reuse a declared
+ * field name or `id`, and it must point at a declared field (not at another alias).
+ */
+export function parseAliasDeclarations(aliases: unknown, fields: FieldMap): AliasMap {
+  if (aliases === undefined) {
+    return {};
+  }
+
+  if (!isPlainObject(aliases)) {
+    throw new LamedError("invalid_argument", 'Property "aliases" must be an object.');
+  }
+
+  const names = Object.keys(aliases);
+
+  if (names.length > LIMITS.maxAliases) {
+    throw new LamedError(
+      "invalid_argument",
+      `A collection can declare at most ${LIMITS.maxAliases} aliases.`,
+    );
+  }
+
+  const parsed: Record<string, string> = {};
+
+  for (const name of names) {
+    if (!FIELD_NAME.test(name)) {
+      throw new LamedError(
+        "invalid_argument",
+        `Alias name "${preview(name)}" is not allowed. Use a letter or underscore, then letters, digits, or underscores, up to 64 characters.`,
+        { alias: name },
+      );
+    }
+
+    if (name === "id" || Object.prototype.hasOwnProperty.call(fields, name)) {
+      throw new LamedError(
+        "invalid_argument",
+        `Alias "${name}" collides with ${name === "id" ? 'the reserved name "id"' : "a declared field"}.`,
+        { alias: name },
+      );
+    }
+
+    const target = aliases[name];
+
+    if (typeof target !== "string" || !Object.prototype.hasOwnProperty.call(fields, target)) {
+      throw new LamedError(
+        "invalid_argument",
+        `Alias "${name}" must point at a declared field. Declared fields: ${listNames(Object.keys(fields))}.`,
+        { alias: name },
+      );
+    }
+
+    defineOwn(parsed, name, target);
+  }
+
+  return parsed;
+}
+
+function listNames(names: readonly string[]): string {
+  return names.length === 0 ? "(none)" : names.map((name) => `"${name}"`).join(", ");
+}
+
+/**
  * Copy a JSON document and check declared field types.
  * Null is a stored value. Omitted fields are left missing. Extra fields are kept.
  */
@@ -492,7 +560,7 @@ function fieldTypeError(name: string, type: FieldType, requirement: string): Lam
   });
 }
 
-function isCanonicalTimestamp(value: string): boolean {
+export function isCanonicalTimestamp(value: string): boolean {
   if (!TIMESTAMP.test(value)) {
     return false;
   }
@@ -526,7 +594,7 @@ function optionKeyName(key: string | symbol): string {
   return preview(key.description ?? "symbol");
 }
 
-function preview(value: string): string {
+export function preview(value: string): string {
   const flat = value.replace(/[\u0000-\u001F\u007F]/g, " ");
 
   if (flat.length <= 80) {

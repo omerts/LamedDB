@@ -495,6 +495,7 @@ function explodingStore(): Store {
     putRecord: async () => fail(),
     getRecord: async () => fail(),
     deleteRecord: async () => fail(),
+    listRecords: async () => fail(),
   };
 }
 

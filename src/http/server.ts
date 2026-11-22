@@ -10,6 +10,8 @@ import { OversizedBodyError, readJsonBody, readLimitedBody } from "./body.js";
 
 const HEALTH_PATH = "/health";
 const RECORD_PATH = /^\/v1\/collections\/([^/]+)\/records\/([^/]+)$/;
+const LIST_PATH = /^\/v1\/collections\/([^/]+)\/records$/;
+const FILTER_KEY = /^filter\[([^[\]]+)\](?:\[([^[\]]+)\])?$/;
 const COLLECTION_PATH = /^\/v1\/collections\/([^/]+)$/;
 
 export interface ListenOptions {
@@ -171,7 +173,10 @@ async function route(
     rejectIfNoneMatch(req, "If-None-Match is not supported yet.");
 
     const body = parseCreateCollectionBody(await readJsonBody(req));
-    const collection = await service.createCollection(body.name, { fields: body.fields });
+    const collection = await service.createCollection(body.name, {
+      fields: body.fields,
+      aliases: body.aliases,
+    });
 
     return {
       status: 201,
@@ -207,6 +212,12 @@ async function route(
       status: 204,
       body: undefined,
     };
+  }
+
+  const listMatch = LIST_PATH.exec(path);
+
+  if (listMatch) {
+    return listRecords(req, url, service, listMatch[1]);
   }
 
   const recordMatch = RECORD_PATH.exec(path);
@@ -293,6 +304,86 @@ async function route(
   return methodNotAllowed(["GET", "PUT", "DELETE"]);
 }
 
+/**
+ * `GET /v1/collections/{name}/records`: the one route that accepts query parameters.
+ * Allowed: `limit`, `cursor`, `sort`, and `filter[field]` / `filter[field][op]`.
+ * This only reads the syntax. The service checks fields, types, and the cursor.
+ */
+async function listRecords(
+  req: IncomingMessage,
+  url: URL,
+  service: CollectionService,
+  segment: string | undefined,
+): Promise<HttpResult> {
+  // After the key check, any other method is 405 whatever else the request carries.
+  if (req.method !== "GET") {
+    return methodNotAllowed(["GET"]);
+  }
+
+  if (segment === undefined) {
+    throw new LamedError("not_found", `No route for GET ${url.pathname}.`);
+  }
+
+  const name = decodePathSegment(segment);
+
+  rejectIfMatch(req);
+  rejectIdempotencyKey(req);
+  rejectIfNoneMatch(req, "If-None-Match is not supported on this request.");
+  await rejectUnexpectedBody(req, "GET");
+
+  const options = readListQuery(url);
+  const page = await service.listRecords(name, options);
+
+  return { status: 200, body: page };
+}
+
+function readListQuery(url: URL): { limit?: string; cursor?: string; sort?: string; filter: Record<string, Record<string, string>> } {
+  const options: { limit?: string; cursor?: string; sort?: string; filter: Record<string, Record<string, string>> } = {
+    filter: Object.create(null) as Record<string, Record<string, string>>,
+  };
+
+  for (const [key, value] of url.searchParams) {
+    if (key === "limit" || key === "cursor" || key === "sort") {
+      if (options[key] !== undefined) {
+        throw new LamedError("invalid_argument", `Query parameter "${key}" can only be given once.`, {
+          parameter: key,
+        });
+      }
+
+      options[key] = value;
+      continue;
+    }
+
+    const match = FILTER_KEY.exec(key);
+
+    if (!match || match[1] === undefined) {
+      // Only keys that look like an attempt at the filter syntax are "malformed". `filters` or `filterBy` are unknown.
+      const triedFilter = key === "filter" || key.startsWith("filter[") || key.startsWith("filter.");
+
+      throw new LamedError(
+        "invalid_argument",
+        triedFilter
+          ? `Malformed filter "${previewKey(key)}". Use filter[field]=value or filter[field][operator]=value.`
+          : `Unknown query parameter "${previewKey(key)}".`,
+        { parameter: triedFilter ? "filter" : "query" },
+      );
+    }
+
+    const clauses = (options.filter[match[1]] ??= Object.create(null) as Record<string, string>);
+    const op = match[2] ?? "eq";
+
+    if (clauses[op] !== undefined) {
+      throw new LamedError("invalid_argument", `Filter ${previewKey(match[1])}[${previewKey(op)}] is repeated.`, {
+        parameter: "filter",
+      });
+    }
+
+    clauses[op] = value;
+  }
+
+  return options;
+}
+
 function requireListenOptions(options: ListenOptions): ListenOptions {
   if (options === undefined || options === null || typeof options !== "object" || Array.isArray(options)) {
     throw new LamedError(
@@ -355,16 +446,16 @@ function apiKeyMatches(token: string, apiKeys: readonly string[]): boolean {
   return matched;
 }
 
-function parseCreateCollectionBody(body: unknown): { name: string; fields: unknown } {
+function parseCreateCollectionBody(body: unknown): { name: string; fields: unknown; aliases: unknown } {
   if (!isPlainObject(body)) {
     throw new LamedError("invalid_argument", "Request body must be a JSON object.");
   }
 
   for (const key of Object.keys(body)) {
-    if (key !== "name" && key !== "fields") {
+    if (key !== "name" && key !== "fields" && key !== "aliases") {
       throw new LamedError(
         "invalid_argument",
-        `Unknown property "${previewKey(key)}". Expected "name" and "fields".`,
+        `Unknown property "${previewKey(key)}". Expected "name", "fields" and "aliases".`,
       );
     }
   }
@@ -376,6 +467,7 @@ function parseCreateCollectionBody(body: unknown): { name: string; fields: unkno
   return {
     name: body.name,
     fields: body.fields,
+    aliases: body.aliases,
   };
 }
 

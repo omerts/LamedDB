@@ -688,6 +688,7 @@ describe("deleting a collection drops its keys", () => {
       deleteCollection: (name) => store.deleteCollection(name),
       getRecord: (collection, id) => store.getRecord(collection, id),
       deleteRecord: (collection, id) => store.deleteRecord(collection, id),
+      listRecords: (input) => store.listRecords(input),
       async putRecord(input) {
         if (input.collection === "orders" && !replaced) {
           replaced = true;

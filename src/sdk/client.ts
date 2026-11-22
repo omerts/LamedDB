@@ -2,11 +2,14 @@ import { isErrorCode, LamedError } from "../errors.js";
 import type {
   CollectionInfo,
   CollectionSpec,
+  FilterScalar,
   JsonObject,
+  ListOptions,
+  ListResult,
   PutOptions,
   RecordEnvelope,
 } from "../types.js";
-import { isPlainObject, isValidApiKey, parseCollectionName, parsePutOptions } from "../validate.js";
+import { isPlainObject, isValidApiKey, LIMITS, parseCollectionName, parsePutOptions, preview } from "../validate.js";
 
 export interface LamedDBOptions {
   baseUrl: string;
@@ -77,6 +80,11 @@ export class CollectionClient {
   delete(id: string): Promise<void> {
     return deleteRecord(this.transport, this.name, id);
   }
+
+  /** One page of records. Pass `nextCursor` back as `cursor` for the next page. */
+  list(options?: ListOptions): Promise<ListResult> {
+    return listRecords(this.transport, this.name, options);
+  }
 }
 
 async function createCollection(
@@ -84,10 +92,14 @@ async function createCollection(
   name: string,
   spec?: CollectionSpec,
 ): Promise<CollectionInfo> {
-  const body: { name: string; fields?: CollectionSpec["fields"] } = { name };
+  const body: { name: string; fields?: CollectionSpec["fields"]; aliases?: CollectionSpec["aliases"] } = { name };
 
   if (spec?.fields !== undefined) {
     body.fields = spec.fields;
+  }
+
+  if (spec?.aliases !== undefined) {
+    body.aliases = spec.aliases;
   }
 
   const parsed = await requestJson(transport, "POST", "/v1/collections", body);
@@ -96,10 +108,16 @@ async function createCollection(
     throw new LamedError("internal", "Server returned an unexpected collection payload.");
   }
 
-  return {
+  const info: CollectionInfo = {
     name: parsed.name,
     fields: parsed.fields as CollectionInfo["fields"],
   };
+
+  if (isPlainObject(parsed.aliases)) {
+    info.aliases = parsed.aliases as CollectionInfo["aliases"];
+  }
+
+  return info;
 }
 
 async function deleteCollection(transport: Transport, name: string): Promise<void> {
@@ -174,6 +192,162 @@ async function requestJson(
   }
 
   return parsed;
+}
+
+async function listRecords(
+  transport: Transport,
+  collection: string,
+  options?: ListOptions,
+): Promise<ListResult> {
+  const query = encodeListQuery(options);
+  const path = `/v1/collections/${encodeURIComponent(parseCollectionName(collection))}/records`;
+  const parsed = await requestJson(transport, "GET", query.length === 0 ? path : `${path}?${query}`);
+
+  if (
+    !isPlainObject(parsed) ||
+    !Array.isArray(parsed.records) ||
+    !(parsed.nextCursor === null || typeof parsed.nextCursor === "string")
+  ) {
+    throw new LamedError("internal", "Server returned an unexpected list payload.");
+  }
+
+  return {
+    records: parsed.records.map((record) => parseEnvelope(record)),
+    nextCursor: parsed.nextCursor,
+  };
+}
+
+const RANGE_OPERATORS = ["gt", "gte", "lt", "lte"];
+const FILTER_OPERATORS = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "prefix"];
+
+/** Check list options at runtime and build the query string. The server checks field names and types. */
+function encodeListQuery(options: unknown): string {
+  if (options === undefined) {
+    return "";
+  }
+
+  if (!isPlainObject(options)) {
+    throw new LamedError("invalid_argument", "List options must be an object.");
+  }
+
+  for (const key of Reflect.ownKeys(options)) {
+    if (key !== "limit" && key !== "cursor" && key !== "sort" && key !== "filter") {
+      throw new LamedError("invalid_argument", `Unknown list option "${typeof key === "string" ? preview(key) : "symbol"}".`);
+    }
+  }
+
+  const pairs: [string, string][] = [];
+  const { limit, cursor, sort, filter } = options;
+
+  if (limit !== undefined) {
+    if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > LIMITS.maxListLimit) {
+      throw new LamedError("invalid_argument", `limit must be a whole number from 1 to ${LIMITS.maxListLimit}.`);
+    }
+
+    pairs.push(["limit", String(limit)]);
+  }
+
+  if (cursor !== undefined) {
+    if (typeof cursor !== "string" || cursor.length === 0) {
+      throw new LamedError("invalid_argument", "cursor must be a non-empty string.");
+    }
+
+    pairs.push(["cursor", cursor]);
+  }
+
+  if (sort !== undefined) {
+    if (typeof sort !== "string" || sort.length === 0) {
+      throw new LamedError("invalid_argument", "sort must be a non-empty string.");
+    }
+
+    pairs.push(["sort", sort]);
+  }
+
+  if (filter !== undefined) {
+    if (!isPlainObject(filter)) {
+      throw new LamedError("invalid_argument", "filter must be an object.");
+    }
+
+    let clauses = 0;
+
+    for (const field of Object.keys(filter)) {
+      const entry = filter[field];
+
+      if (isPlainObject(entry)) {
+        if (Object.keys(entry).length === 0) {
+          throw new LamedError(
+            "invalid_argument",
+            `Filter "${preview(field)}" has no operator. Use a value, or an object such as { gte: 1 }.`,
+          );
+        }
+
+        for (const op of Object.keys(entry)) {
+          if (!FILTER_OPERATORS.includes(op)) {
+            throw new LamedError("invalid_argument", `Unknown filter operator "${preview(op)}" on "${preview(field)}".`);
+          }
+
+          clauses += 1;
+          pairs.push([`filter[${field}][${op}]`, filterText(entry[op], op, `${field}[${op}]`)]);
+        }
+      } else {
+        clauses += 1;
+        pairs.push([`filter[${field}]`, filterText(entry, "eq", field)]);
+      }
+    }
+
+    if (clauses > LIMITS.maxFilterClauses) {
+      throw new LamedError(
+        "invalid_argument",
+        `A list request can have at most ${LIMITS.maxFilterClauses} filter clauses, got ${clauses}.`,
+      );
+    }
+  }
+
+  return pairs.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+}
+
+function filterText(value: unknown, op: string, label: string): string {
+  if (op === "in") {
+    if (!Array.isArray(value) || value.length === 0 || value.length > LIMITS.maxInValues) {
+      throw new LamedError(
+        "invalid_argument",
+        `Filter ${preview(label)} needs an array of 1 to ${LIMITS.maxInValues} values.`,
+      );
+    }
+
+    return value.map((item) => scalarText(item, label, true)).join(",");
+  }
+
+  if (op === "prefix" && (typeof value !== "string" || value.length === 0)) {
+    throw new LamedError("invalid_argument", `Filter ${preview(label)} needs a non-empty string prefix.`);
+  }
+
+  if (value === null && RANGE_OPERATORS.includes(op)) {
+    throw new LamedError("invalid_argument", `Filter ${preview(label)} cannot compare with null.`);
+  }
+
+  return scalarText(value, label, false);
+}
+
+function scalarText(value: unknown, label: string, inList: boolean): string {
+  const scalar = value as FilterScalar;
+
+  if (scalar === null) {
+    return "null";
+  }
+
+  if (typeof scalar === "number" && Number.isSafeInteger(scalar)) {
+    return String(scalar);
+  }
+
+  if (typeof scalar === "string" && !(inList && scalar.includes(","))) {
+    return scalar;
+  }
+
+  throw new LamedError(
+    "invalid_argument",
+    `Filter ${preview(label)} needs a string, a safe integer, or null${inList ? " (no commas inside a list value)" : ""}.`,
+  );
 }
 
 function parseEnvelope(parsed: unknown): RecordEnvelope {

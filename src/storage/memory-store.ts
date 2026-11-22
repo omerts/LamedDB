@@ -1,13 +1,23 @@
 import { LamedError } from "../errors.js";
-import type { CollectionInfo, FieldMap, FieldType, JsonObject, RecordEnvelope } from "../types.js";
+import type {
+  AliasMap,
+  CollectionInfo,
+  FieldMap,
+  FieldType,
+  JsonObject,
+  RecordEnvelope,
+} from "../types.js";
 import { parseMemoryStoreOptions } from "../validate.js";
 import type {
   CollectionState,
   IdempotentPut,
+  ListRecordsInput,
+  ListRecordsResult,
   PutRecordInput,
   PutRecordResult,
   Store,
 } from "./store.js";
+import { compareRecords, isAfter, matchesFilters } from "./query.js";
 
 interface StoredRecord {
   id: string;
@@ -34,6 +44,7 @@ export interface MemoryStoreOptions {
 interface StoredCollection {
   name: string;
   fields: FieldMap;
+  aliases: AliasMap;
   revision: number;
 }
 
@@ -72,7 +83,11 @@ export class MemoryStore implements Store {
     this.maxIdempotencyKeys = retention.maxIdempotencyKeys;
   }
 
-  async createCollection(name: string, fields: FieldMap): Promise<CollectionInfo> {
+  async createCollection(
+    name: string,
+    fields: FieldMap,
+    aliases: AliasMap = {},
+  ): Promise<CollectionInfo> {
     if (this.collections.has(name)) {
       throw new LamedError("already_exists", `Collection "${name}" already exists.`);
     }
@@ -80,6 +95,7 @@ export class MemoryStore implements Store {
     const collection: StoredCollection = {
       name,
       fields: cloneFields(fields),
+      aliases: cloneAliases(aliases),
       revision: this.nextRevision,
     };
 
@@ -97,8 +113,7 @@ export class MemoryStore implements Store {
     }
 
     return {
-      name: collection.name,
-      fields: cloneFields(collection.fields),
+      ...cloneCollection(collection),
       revision: collection.revision,
     };
   }
@@ -246,6 +261,37 @@ export class MemoryStore implements Store {
     return this.records.get(collection)?.delete(id) ?? false;
   }
 
+  /**
+   * Synchronous after the lookups, so the scan sees one snapshot. Every page filters and sorts
+   * the whole collection, which is fine for this in-memory slice and is the cost an index would remove.
+   */
+  async listRecords(input: ListRecordsInput): Promise<ListRecordsResult> {
+    const collection = this.collections.get(input.collection);
+
+    if (!collection || collection.revision !== input.collectionRevision) {
+      throw new LamedError("not_found", `Collection "${input.collection}" does not exist.`);
+    }
+
+    // Filter, sort and slice the stored records, and copy only the page that is returned.
+    const matching: StoredRecord[] = [];
+
+    for (const stored of this.records.get(input.collection)?.values() ?? []) {
+      if (matchesFilters(stored, input.filters)) {
+        matching.push(stored);
+      }
+    }
+
+    matching.sort((a, b) => compareRecords(a, b, input.sort));
+
+    const { after } = input;
+    const remaining = after === undefined ? matching : matching.filter((record) => isAfter(record, after, input.sort));
+
+    return {
+      records: remaining.slice(0, input.limit).map(cloneRecord),
+      hasMore: remaining.length > input.limit,
+    };
+  }
+
   private bucket<T>(map: Map<string, Map<string, T>>, collection: string): Map<string, T> {
     let inner = map.get(collection);
 
@@ -382,11 +428,22 @@ function cloneFields(fields: FieldMap): FieldMap {
   return copy;
 }
 
+function cloneAliases(aliases: AliasMap): AliasMap {
+  return { ...aliases };
+}
+
+/** The payload callers see. `aliases` appears only when the collection declared some. */
 function cloneCollection(collection: CollectionInfo): CollectionInfo {
-  return {
+  const copy: CollectionInfo = {
     name: collection.name,
     fields: cloneFields(collection.fields),
   };
+
+  if (collection.aliases !== undefined && Object.keys(collection.aliases).length > 0) {
+    copy.aliases = cloneAliases(collection.aliases);
+  }
+
+  return copy;
 }
 
 function cloneRecord(record: StoredRecord): RecordEnvelope {
