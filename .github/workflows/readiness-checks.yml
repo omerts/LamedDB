@@ -1,0 +1,72 @@
+name: Readiness checks
+
+# Untrusted pull request code. The token is cleared before npm so lifecycle
+# scripts and tests cannot call the GitHub API. This job does not write the verdict.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: readiness-checks-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        id: install
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ""
+        run: npm ci
+
+      - name: Typecheck
+        id: typecheck
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ""
+        run: npm run typecheck
+
+      - name: Build
+        id: build
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ""
+        run: npm run build
+
+      - name: Tests
+        id: test
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ""
+        run: npm test
+
+      - name: Require check outcomes
+        if: always()
+        run: |
+          ok=1
+          for outcome in "${{ steps.install.outcome }}" "${{ steps.typecheck.outcome }}" "${{ steps.build.outcome }}" "${{ steps.test.outcome }}"; do
+            if [ "$outcome" != "success" ]; then
+              ok=0
+            fi
+          done
+          if [ "$ok" != "1" ]; then
+            exit 1
+          fi

@@ -1,64 +1,90 @@
 name: Readiness
 
+# The verdict workflow is read from the default branch (workflow_run,
+# pull_request_target, pull_request_review, issue_comment). It checks out
+# that branch's scripts/readiness.mjs and never checks out pull request code.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  workflow_run:
+    workflows: ["Readiness checks"]
+    types: [completed]
+  pull_request_target:
+    types: [ready_for_review, labeled, unlabeled]
   pull_request_review:
-    types: [submitted, dismissed]
+    types: [submitted, edited, dismissed]
+  issue_comment:
+    types: [created, edited, deleted]
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "PR number to assess (leave empty to run checks only)"
-        required: false
+        description: "PR number to assess"
+        required: true
         type: string
 
 permissions:
   contents: read
   pull-requests: read
   issues: read
+  checks: read
+  actions: write
 
 concurrency:
-  group: readiness-${{ github.event.pull_request.number || inputs.pr_number || github.run_id }}
+  group: readiness-verdict-${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_sha || inputs.pr_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  readiness:
+  verdict:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
+      - name: Refuse a dispatch that is not the default branch
+        if: github.event_name == 'workflow_dispatch' && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          {
+            echo "## Readiness: ⛔ NOT READY"
+            echo
+            echo "- Verdict workflow was dispatched from a branch other than the default branch"
+          } >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' '{"verdict":"NOT READY","reasons":["Verdict workflow was dispatched from a branch other than the default branch"],"notes":[],"checks":{},"pr":null,"review":null}' > readiness.json
+          echo "refused=1" >> "$GITHUB_ENV"
 
-      # Each check records its outcome but never stops the job, so the
-      # readiness report is always produced.
-      - name: Typecheck
-        id: typecheck
-        continue-on-error: true
-        run: npm run typecheck
-      - name: Build
-        id: build
-        continue-on-error: true
-        run: npm run build
-      - name: Tests
-        id: test
-        continue-on-error: true
-        run: npm test
+      - uses: actions/checkout@v4
+        if: env.refused != '1'
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - name: Readiness assessment
+        if: env.refused != '1'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-          CHECKS: >-
-            {"typecheck":"${{ steps.typecheck.outcome }}","build":"${{ steps.build.outcome }}","tests":"${{ steps.test.outcome }}"}
-        run: node scripts/readiness.mjs
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr_number }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          CHECKS_WORKFLOW: readiness-checks.yml
+        run: |
+          if [ ! -f scripts/readiness.mjs ]; then
+            printf '%s\n' '{"verdict":"NOT READY","reasons":["Trusted readiness script is not on the default branch"],"notes":[],"checks":{},"pr":null,"review":null}' > readiness.json
+            {
+              echo "## Readiness: ⛔ NOT READY"
+              echo
+              echo "- Trusted readiness script is not on the default branch"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          node scripts/readiness.mjs || {
+            printf '%s\n' '{"verdict":"NOT READY","reasons":["Readiness script failed"],"notes":[],"checks":{},"pr":null,"review":null}' > readiness.json
+            {
+              echo "## Readiness: ⛔ NOT READY"
+              echo
+              echo "- Readiness script failed"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: readiness-result
           path: readiness.json
+          if-no-files-found: warn
