@@ -2,6 +2,8 @@
 
 LamedDB is a cloud-native database that adapts how it stores, serves, and streams data as usage changes. Applications use one API to write and query records, publish events, and subscribe to changes. A collection can change physical layout without changing application code.
 
+[Product plan](docs/proposal.md)
+
 The pilot is a TypeScript SDK and HTTP API for single-region workflows such as orders, tickets, and activity.
 
 This slice stores data in memory behind a `Store` interface. A durable engine can replace that adapter later. Every request needs an API key. The server binds to `127.0.0.1` unless `HOST` is set, and it refuses to start when `LAMEDDB_API_KEYS` is missing.
