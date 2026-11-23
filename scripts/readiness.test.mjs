@@ -392,13 +392,23 @@ describe("pagination", () => {
           body = { commit: { committer: { date: HEAD_AT } } };
         } else if (parsed.pathname.endsWith("/runs")) {
           body = {
-            workflow_runs: [{ id: 9, head_sha: HEAD, path: ".github/workflows/readiness-checks.yml" }],
+            workflow_runs: [
+              {
+                id: 9,
+                head_sha: HEAD,
+                path: ".github/workflows/readiness-checks.yml",
+                status: "completed",
+                conclusion: "success",
+              },
+            ],
           };
         } else if (parsed.pathname.endsWith("/jobs")) {
           body = {
             jobs: [
               {
                 name: "checks",
+                status: "completed",
+                conclusion: "success",
                 steps: [
                   { name: "Install", conclusion: "success" },
                   { name: "Typecheck", conclusion: "success" },
@@ -464,6 +474,170 @@ describe("pagination", () => {
     );
 
     reason(result, "Review thread list is incomplete");
+  });
+});
+
+const SUCCESS_STEPS = [
+  { name: "Install", conclusion: "success" },
+  { name: "Typecheck", conclusion: "success" },
+  { name: "Build", conclusion: "success" },
+  { name: "Tests", conclusion: "success" },
+];
+
+function readyReviewFetch({ run, job, pullsForCommit }) {
+  return async (url, options = {}) => {
+    const parsed = new URL(url);
+    let body = [];
+
+    if (options.method === "POST") {
+      body = {
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+            },
+          },
+        },
+      };
+    } else if (parsed.pathname.endsWith("/commits/" + HEAD + "/pulls")) {
+      body = pullsForCommit;
+    } else if (parsed.pathname.endsWith("/pulls/24/files") || parsed.pathname.endsWith("/pulls/24/reviews") || parsed.pathname.endsWith("/pulls/24/comments")) {
+      body = [];
+    } else if (parsed.pathname.endsWith("/issues/24/comments")) {
+      body = [
+        {
+          user: { login: QODO },
+          created_at: AFTER,
+          updated_at: AFTER,
+          body: `<!-- qodo-describe-head:${HEAD} -->`,
+        },
+      ];
+    } else if (parsed.pathname.endsWith("/issues/24/events")) {
+      body = [
+        {
+          event: "labeled",
+          created_at: AFTER,
+          actor: { login: QODO },
+          label: { name: "Qodo approved" },
+        },
+      ];
+    } else if (parsed.pathname.endsWith("/pulls/24")) {
+      body = { draft: false, head: { sha: HEAD }, labels: [{ name: "Qodo approved" }] };
+    } else if (parsed.pathname.endsWith(`/commits/${HEAD}`)) {
+      body = { commit: { committer: { date: HEAD_AT } } };
+    } else if (parsed.pathname.endsWith("/runs")) {
+      body = { workflow_runs: [run] };
+    } else if (parsed.pathname === "/repos/acme/db/actions/runs/9") {
+      body = run;
+    } else if (parsed.pathname.endsWith("/jobs")) {
+      body = { jobs: [job] };
+    } else {
+      throw new Error(`unexpected ${url}`);
+    }
+
+    return { ok: true, status: 200, json: async () => body };
+  };
+}
+
+describe("check run acceptance", () => {
+  const env = {
+    GITHUB_TOKEN: "token",
+    REPO: "acme/db",
+    PR_NUMBER: "24",
+    GITHUB_API_URL: "https://api.example.test",
+    GITHUB_GRAPHQL_URL: "https://api.example.test/graphql",
+  };
+
+  async function assessRun(run, job) {
+    return runAssessment(
+      env,
+      readyReviewFetch({
+        run: {
+          id: 9,
+          head_sha: HEAD,
+          path: ".github/workflows/readiness-checks.yml",
+          ...run,
+        },
+        job: {
+          name: "checks",
+          steps: SUCCESS_STEPS,
+          ...job,
+        },
+      }),
+    );
+  }
+
+  it("does not accept succeeded steps when the workflow run was canceled", async () => {
+    const result = await assessRun(
+      { status: "completed", conclusion: "cancelled" },
+      { status: "completed", conclusion: "success" },
+    );
+
+    reason(result, "Readiness checks run is completed/cancelled, not completed/success");
+    assert.equal(result.review.qodoCoversHead, true);
+    assert.equal(result.checks.install, "missing");
+    assert.equal(result.checks.tests, "missing");
+    assert.equal(result.reasons.some((item) => item.startsWith('Check "')), false);
+  });
+
+  it("does not accept succeeded steps when the checks job is incomplete", async () => {
+    const result = await assessRun(
+      { status: "completed", conclusion: "success" },
+      { status: "in_progress", conclusion: null },
+    );
+
+    reason(result, "Readiness checks job is in_progress/none, not completed/success");
+    assert.equal(result.checks.build, "missing");
+    assert.notEqual(result.verdict, "READY");
+  });
+});
+
+function runAssessment(env, fetchImpl) {
+  return run(env, fetchImpl, { maxPages: 5, pageSize: 20 });
+}
+
+describe("workflow run pull request lookup", () => {
+  it("does not assess a closed or moved pull request when no open head matches", async () => {
+    const calls = [];
+    const headRun = {
+      id: 9,
+      head_sha: HEAD,
+      path: ".github/workflows/readiness-checks.yml",
+      status: "completed",
+      conclusion: "success",
+    };
+    const result = await run(
+      {
+        GITHUB_TOKEN: "token",
+        REPO: "acme/db",
+        WORKFLOW_RUN_ID: "9",
+        GITHUB_API_URL: "https://api.example.test",
+        GITHUB_GRAPHQL_URL: "https://api.example.test/graphql",
+      },
+      async (url) => {
+        calls.push(String(url));
+        const parsed = new URL(url);
+        let body = [];
+
+        if (parsed.pathname === "/repos/acme/db/actions/runs/9") {
+          body = headRun;
+        } else if (parsed.pathname.endsWith(`/commits/${HEAD}/pulls`)) {
+          body = [
+            { number: 7, state: "closed", head: { sha: HEAD } },
+            { number: 8, state: "open", head: { sha: OTHER } },
+          ];
+        } else {
+          throw new Error(`unexpected ${url}`);
+        }
+
+        return { ok: true, status: 200, json: async () => body };
+      },
+    );
+
+    reason(result, "No open pull request has a head SHA matching the readiness checks run");
+    assert.equal(result.pr, null);
+    assert.equal(result.review, null);
+    assert.equal(calls.some((url) => url.includes("/pulls/7") || url.includes("/pulls/8")), false);
   });
 });
 

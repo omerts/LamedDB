@@ -50,6 +50,33 @@ export function checksFromJobs(jobs) {
   return checks;
 }
 
+function isCompletedSuccess(record) {
+  return record?.status === "completed" && record?.conclusion === "success";
+}
+
+function acceptCheckResults(run, jobs) {
+  const job = (jobs || []).find((item) => item.name === "checks") || null;
+
+  if (isCompletedSuccess(run) && isCompletedSuccess(job)) {
+    return { checks: checksFromJobs(jobs), reason: null };
+  }
+
+  const problems = [];
+
+  if (!isCompletedSuccess(run)) {
+    problems.push(`run is ${run?.status || "missing"}/${run?.conclusion || "none"}`);
+  }
+
+  if (!isCompletedSuccess(job)) {
+    problems.push(`job is ${job?.status || "missing"}/${job?.conclusion || "none"}`);
+  }
+
+  return {
+    checks: emptyChecks(),
+    reason: `Readiness checks ${problems.join(" and ")}, not completed/success`,
+  };
+}
+
 function stepOutcome(step) {
   if (typeof step.conclusion === "string" && step.conclusion) {
     return step.conclusion;
@@ -160,7 +187,9 @@ export function assess(input) {
   const notes = [];
   const checks = { ...emptyChecks(), ...input.checks };
 
-  if (input.checksMismatch) {
+  if (input.checksRejected) {
+    reasons.push(input.checksRejected);
+  } else if (input.checksMismatch) {
     reasons.push(
       `Readiness checks ran for ${input.checksMismatch.runSha}, not the pull request head ${input.checksMismatch.headSha}`,
     );
@@ -507,12 +536,14 @@ async function loadChecks(get, env, repo, headSha, limits) {
     },
     limits,
   );
+  const accepted = acceptCheckResults(run, jobs.items);
 
   return {
-    checks: checksFromJobs(jobs.items),
+    checks: accepted.checks,
     found: true,
     truncated: jobs.truncated,
     mismatch: null,
+    rejected: accepted.reason,
   };
 }
 
@@ -567,12 +598,15 @@ export async function run(env, fetchImpl = globalThis.fetch, options = {}) {
         throw new Error("Pull request lookup for the head commit was truncated");
       }
 
-      const match =
-        pulls.items.find((item) => item.head?.sha === triggered.head_sha && item.state === "open") || pulls.items[0];
+      const match = pulls.items.find((item) => item.head?.sha === triggered.head_sha && item.state === "open");
 
-      if (match) {
-        number = match.number;
+      if (!match) {
+        return failure(loadedChecks, null, [
+          "No open pull request has a head SHA matching the readiness checks run",
+        ]);
       }
+
+      number = match.number;
     }
 
     if (!number) {
@@ -597,9 +631,10 @@ export async function run(env, fetchImpl = globalThis.fetch, options = {}) {
 
     return assess({
       checks: checksResult.checks,
-      checksMissing: !checksResult.found && !checksResult.mismatch,
+      checksMissing: !checksResult.found && !checksResult.mismatch && !checksResult.rejected,
       checksTruncated: checksResult.truncated,
       checksMismatch: checksResult.mismatch,
+      checksRejected: checksResult.rejected,
       prNumber: number,
       pr,
       headCommittedAt: commit.commit?.committer?.date || "",
