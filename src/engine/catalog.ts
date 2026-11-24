@@ -39,12 +39,15 @@ export interface ReadRepresentation {
 
 /**
  * One published catalog snapshot.
- * `ownership` holds explicit partitions. Every other collection uses `defaultOwnership`.
+ * `ownership` holds explicit partitions. A collection with no explicit entry uses the
+ * default writer. `fallbackEpochs` records that collection's own epoch when it has
+ * diverged from the default entry, so a resolved epoch never goes backwards.
  */
 export interface CatalogGeneration {
   generation: number;
   defaultOwnership: OwnershipEntry;
   ownership: Readonly<Record<string, OwnershipEntry>>;
+  fallbackEpochs?: Readonly<Record<string, number>>;
   representations: readonly ReadRepresentation[];
 }
 
@@ -65,8 +68,11 @@ interface InternalGeneration {
   generation: number;
   defaultOwnership: OwnershipEntry;
   ownership: Map<string, OwnershipEntry>;
-  /** Highest explicit epoch ever used for a partition, including after it was removed. */
-  epochHighWater: Map<string, number>;
+  /**
+   * Last effective writer and epoch for a partition that has been assigned or
+   * has fallen back. Untouched partitions are absent and follow `defaultOwnership`.
+   */
+  remembered: Map<string, OwnershipEntry>;
   representations: readonly ReadRepresentation[];
 }
 
@@ -102,7 +108,7 @@ export class Catalog {
       generation: 1,
       defaultOwnership: { writer, epoch: 1 },
       ownership: new Map(),
-      epochHighWater: new Map(),
+      remembered: new Map(),
       representations: [],
     };
   }
@@ -150,11 +156,34 @@ export function resolveWriter(generation: CatalogGeneration, partition: string):
     throw new LamedError("invalid_argument", "Catalog generation must be an object.");
   }
 
-  const explicit = generation.ownership[name];
-  const entry = explicit === undefined ? generation.defaultOwnership : explicit;
+  const fallback = copyEntry(generation.defaultOwnership, name);
 
+  if (Object.hasOwn(generation.ownership, name)) {
+    return copyEntry(generation.ownership[name], name);
+  }
+
+  const fallbackEpochs = generation.fallbackEpochs;
+
+  if (isPlainObject(fallbackEpochs) && Object.hasOwn(fallbackEpochs, name)) {
+    const epoch = fallbackEpochs[name];
+
+    if (typeof epoch !== "number") {
+      throw new LamedError("invalid_argument", "Ownership entry must include a writer and an epoch.", {
+        partition: name,
+      });
+    }
+
+    return { writer: fallback.writer, epoch };
+  }
+
+  return fallback;
+}
+
+function copyEntry(entry: unknown, partition: string): OwnershipEntry {
   if (!isPlainObject(entry) || typeof entry.writer !== "string" || typeof entry.epoch !== "number") {
-    throw new LamedError("invalid_argument", "Ownership entry must include a writer and an epoch.");
+    throw new LamedError("invalid_argument", "Ownership entry must include a writer and an epoch.", {
+      partition,
+    });
   }
 
   return { writer: entry.writer, epoch: entry.epoch };
@@ -184,7 +213,7 @@ function assertApplicable(registry: EngineRegistry, head: InternalGeneration, ch
 
 function nextGeneration(head: InternalGeneration, change: ParsedChange): InternalGeneration {
   const ownership = new Map(head.ownership);
-  const epochHighWater = new Map(head.epochHighWater);
+  const remembered = new Map(head.remembered);
   let defaultOwnership = { ...head.defaultOwnership };
 
   if (change.defaultWriter !== undefined && change.defaultWriter !== defaultOwnership.writer) {
@@ -192,31 +221,56 @@ function nextGeneration(head: InternalGeneration, change: ParsedChange): Interna
       writer: change.defaultWriter,
       epoch: nextCount(defaultOwnership.epoch, "Ownership epoch"),
     };
+
+    for (const [partition, state] of remembered) {
+      if (ownership.has(partition) || state.writer === defaultOwnership.writer) {
+        continue;
+      }
+
+      remembered.set(partition, advance(state, defaultOwnership.writer));
+    }
   }
 
   for (const partition of change.removePartitions) {
+    const current = ownership.get(partition);
+
+    if (!current) {
+      throw new LamedError("invalid_argument", `Partition "${partition}" has no explicit owner.`, {
+        partition,
+      });
+    }
+
     ownership.delete(partition);
+    remembered.set(
+      partition,
+      current.writer === defaultOwnership.writer
+        ? { writer: current.writer, epoch: current.epoch }
+        : advance(current, defaultOwnership.writer),
+    );
   }
 
   for (const [partition, writer] of change.ownership) {
-    const current = ownership.get(partition);
+    const current = ownership.get(partition) ?? remembered.get(partition) ?? defaultOwnership;
+    const entry = current.writer === writer ? { writer, epoch: current.epoch } : advance(current, writer);
 
-    if (current?.writer === writer) {
-      continue;
-    }
-
-    const epoch = nextCount(epochHighWater.get(partition) ?? 0, "Ownership epoch");
-
-    epochHighWater.set(partition, epoch);
-    ownership.set(partition, { writer, epoch });
+    remembered.set(partition, entry);
+    ownership.set(partition, entry);
   }
 
   return {
     generation: nextCount(head.generation, "Catalog generation"),
     defaultOwnership,
     ownership,
-    epochHighWater,
+    remembered,
     representations: change.representations ?? head.representations.map(copyRepresentation),
+  };
+}
+
+/** The next epoch for a partition whose writer is changing. The same writer keeps its epoch. */
+function advance(current: OwnershipEntry, writer: string): OwnershipEntry {
+  return {
+    writer,
+    epoch: nextCount(current.epoch, "Ownership epoch"),
   };
 }
 
@@ -478,7 +532,8 @@ function representationIdentity(representation: ReadRepresentation): string {
 }
 
 function toPublicGeneration(head: InternalGeneration): CatalogGeneration {
-  const ownership: Record<string, OwnershipEntry> = {};
+  const ownership: Record<string, OwnershipEntry> = Object.create(null);
+  const fallbackEpochs: Record<string, number> = Object.create(null);
 
   for (const [partition, entry] of head.ownership) {
     Object.defineProperty(ownership, partition, {
@@ -489,12 +544,35 @@ function toPublicGeneration(head: InternalGeneration): CatalogGeneration {
     });
   }
 
-  return Object.freeze({
+  for (const [partition, state] of head.remembered) {
+    if (head.ownership.has(partition)) {
+      continue;
+    }
+
+    if (state.writer === head.defaultOwnership.writer && state.epoch === head.defaultOwnership.epoch) {
+      continue;
+    }
+
+    Object.defineProperty(fallbackEpochs, partition, {
+      value: state.epoch,
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
+  }
+
+  const generation: CatalogGeneration = {
     generation: head.generation,
     defaultOwnership: Object.freeze({ ...head.defaultOwnership }),
     ownership: Object.freeze(ownership),
     representations: Object.freeze(head.representations.map(copyRepresentation)),
-  });
+  };
+
+  if (Object.keys(fallbackEpochs).length > 0) {
+    generation.fallbackEpochs = Object.freeze(fallbackEpochs);
+  }
+
+  return Object.freeze(generation);
 }
 
 function copyRepresentation(representation: ReadRepresentation): ReadRepresentation {

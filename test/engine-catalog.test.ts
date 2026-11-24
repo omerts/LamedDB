@@ -75,6 +75,8 @@ describe("routing catalog", () => {
     });
     expect(resolveWriter(current, "orders")).toEqual({ writer: "memory", epoch: 1 });
     expect(resolveWriter(current, "tickets")).toEqual({ writer: "memory", epoch: 1 });
+    expect(resolveWriter(current, "constructor")).toEqual({ writer: "memory", epoch: 1 });
+    expect(resolveWriter(current, "toString")).toEqual({ writer: "memory", epoch: 1 });
   });
 
   it("rejects a stale publish and leaves the catalog and the previous snapshot unchanged", () => {
@@ -146,14 +148,14 @@ describe("routing catalog", () => {
     const first = catalog.publish(1, { ownership: { orders: "memory", tickets: "other" } });
 
     expect(first.ownership.orders).toEqual({ writer: "memory", epoch: 1 });
-    expect(first.ownership.tickets).toEqual({ writer: "other", epoch: 1 });
+    expect(first.ownership.tickets).toEqual({ writer: "other", epoch: 2 });
     expect(resolveWriter(first, "orders").writer).toBe("memory");
     expect(resolveWriter(first, "payments")).toEqual(first.defaultOwnership);
 
     const replaced = catalog.publish(2, { ownership: { orders: "other" } });
 
     expect(replaced.ownership.orders).toEqual({ writer: "other", epoch: 2 });
-    expect(replaced.ownership.tickets).toEqual({ writer: "other", epoch: 1 });
+    expect(replaced.ownership.tickets).toEqual({ writer: "other", epoch: 2 });
     expect(Object.keys(replaced.ownership)).toEqual(["orders", "tickets"]);
   });
 
@@ -180,12 +182,14 @@ describe("routing catalog", () => {
 
     const removed = catalog.publish(5, { removePartitions: ["orders"] });
 
-    expect(removed.ownership).toEqual({});
-    expect(resolveWriter(removed, "orders")).toEqual(removed.defaultOwnership);
+    expect(Object.keys(removed.ownership)).toEqual([]);
+    expect(resolveWriter(removed, "orders")).toEqual({ writer: "memory", epoch: 3 });
+    expect(removed.fallbackEpochs).toEqual({ orders: 3 });
 
     const restored = catalog.publish(6, { ownership: { orders: "memory" } });
 
     expect(restored.ownership.orders).toEqual({ writer: "memory", epoch: 3 });
+    expect(restored.fallbackEpochs).toBeUndefined();
 
     const switched = catalog.publish(7, { defaultWriter: "other" });
 
@@ -219,7 +223,7 @@ describe("routing catalog", () => {
     const published = catalog.current();
 
     expect(published.generation).toBe(2);
-    expect(published.ownership.orders).toEqual({ writer: "other", epoch: 1 });
+    expect(published.ownership.orders).toEqual({ writer: "other", epoch: 2 });
     expect(published.representations).toEqual([representation()]);
     expect(published).not.toBe(pinned);
   });
@@ -271,6 +275,30 @@ describe("routing catalog", () => {
 
     expect(cleared.representations).toEqual([]);
     expect(cleared.generation).toBe(4);
+  });
+
+  it("never resolves a partition at an earlier epoch", () => {
+    const { catalog } = openCatalog();
+
+    catalog.publish(1, { defaultWriter: "other" });
+    catalog.publish(2, { defaultWriter: "memory" });
+
+    const assigned = catalog.publish(3, { ownership: { orders: "other" } });
+
+    expect(assigned.defaultOwnership).toEqual({ writer: "memory", epoch: 3 });
+    expect(assigned.ownership.orders).toEqual({ writer: "other", epoch: 4 });
+    expect(resolveWriter(assigned, "tickets")).toEqual({ writer: "memory", epoch: 3 });
+
+    const removed = catalog.publish(4, { removePartitions: ["orders"] });
+
+    expect(resolveWriter(removed, "orders")).toEqual({ writer: "memory", epoch: 5 });
+    expect(resolveWriter(removed, "constructor")).toEqual({ writer: "memory", epoch: 3 });
+
+    const moved = catalog.publish(5, { defaultWriter: "other" });
+
+    expect(moved.defaultOwnership).toEqual({ writer: "other", epoch: 4 });
+    expect(resolveWriter(moved, "orders")).toEqual({ writer: "other", epoch: 6 });
+    expect(resolveWriter(moved, "toString")).toEqual({ writer: "other", epoch: 4 });
   });
 
   it("rejects a change that does not parse and leaves the current generation in place", () => {
