@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ENGINE_EXACTNESS,
   ENGINE_OPERATIONS,
+  ENGINE_RECOVERY,
+  ENGINE_ROLES,
+  ENGINE_SNAPSHOTS,
   EngineRegistry,
   LamedError,
   MemoryStore,
@@ -140,16 +144,13 @@ describe("engine registry", () => {
     registry.register("left", left, memoryStoreDescriptor());
     registry.register("right", right, memoryStoreDescriptor());
 
-    const leftStore = registry.get("left")?.store;
-    const rightStore = registry.get("right")?.store;
+    expect(registry.get("left")?.store).toBe(left);
+    expect(registry.get("right")?.store).toBe(right);
 
-    expect(leftStore).toBe(left);
-    expect(rightStore).toBe(right);
+    await left.createCollection("orders", { status: "string" });
 
-    await leftStore?.createCollection("orders", { status: "string" });
-
-    await expect(rightStore?.getCollection("orders")).resolves.toBeNull();
-    await expect(leftStore?.getCollection("orders")).resolves.toMatchObject({ name: "orders" });
+    await expect(right.getCollection("orders")).resolves.toBeNull();
+    await expect(left.getCollection("orders")).resolves.toMatchObject({ name: "orders" });
     expect(registry.list().map((engine) => engine.id)).toEqual(["left", "right"]);
   });
 
@@ -291,5 +292,41 @@ describe("engine registry", () => {
     );
     expect(() => registry.get(1 as unknown as string)).toThrow(LamedError);
     expect(registry.list()).toEqual([]);
+  });
+
+  it("does not let a caller change the capability lists", () => {
+    expect(Object.isFrozen(ENGINE_OPERATIONS)).toBe(true);
+    expect(Object.isFrozen(ENGINE_ROLES)).toBe(true);
+    expect(Object.isFrozen(ENGINE_EXACTNESS)).toBe(true);
+    expect(Object.isFrozen(ENGINE_RECOVERY)).toBe(true);
+    expect(Object.isFrozen(ENGINE_SNAPSHOTS)).toBe(true);
+
+    expect(() => {
+      (ENGINE_OPERATIONS as unknown as string[]).push("dropTable");
+    }).toThrow(TypeError);
+
+    const registry = new EngineRegistry();
+    const descriptor = memoryStoreDescriptor();
+
+    descriptor.operations = ["dropTable" as EngineOperation];
+    expectRejected(() => registry.register("memory", new MemoryStore(), descriptor), /Unknown operation/);
+    expect(memoryStoreDescriptor().operations).toEqual([...ENGINE_OPERATIONS]);
+    expect(registry.list()).toEqual([]);
+  });
+
+  it("registers a store that implements only the operations it advertises", () => {
+    const registry = new EngineRegistry();
+    const listRecords = async () => ({ records: [], hasMore: false });
+    const store = { listRecords };
+    const descriptor = memoryStoreDescriptor();
+
+    descriptor.operations = ["listRecords"];
+    registry.register("reader", store, descriptor);
+
+    const registered = registry.get("reader");
+
+    expect(registered?.store.listRecords).toBe(listRecords);
+    expect(registered?.store.createCollection).toBeUndefined();
+    expect(registered?.descriptor.operations).toEqual(["listRecords"]);
   });
 });

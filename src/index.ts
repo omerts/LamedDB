@@ -10,6 +10,7 @@ export {
   memoryStoreDescriptor,
 } from "./engine/registry.js";
 export type {
+  EngineStore,
   EngineDescriptor,
   EngineExactness,
   EngineOperation,

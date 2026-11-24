@@ -6,8 +6,9 @@ import { isPlainObject, preview } from "../validate.js";
 /**
  * Logical operations an engine can serve.
  * A later engine is added by registration. It picks from this list.
+ * Frozen so a caller cannot change what registration accepts.
  */
-export const ENGINE_OPERATIONS = [
+export const ENGINE_OPERATIONS = Object.freeze([
   "createCollection",
   "getCollection",
   "deleteCollection",
@@ -15,28 +16,38 @@ export const ENGINE_OPERATIONS = [
   "getRecord",
   "deleteRecord",
   "listRecords",
-] as const;
+] as const);
 
 export type EngineOperation = (typeof ENGINE_OPERATIONS)[number];
 
 /** `write-authority` may accept mutations. `derived-read` serves a rebuildable representation. */
-export const ENGINE_ROLES = ["write-authority", "derived-read"] as const;
+export const ENGINE_ROLES = Object.freeze(["write-authority", "derived-read"] as const);
 
 export type EngineRole = (typeof ENGINE_ROLES)[number];
 
-export const ENGINE_EXACTNESS = ["exact", "approximate"] as const;
+export const ENGINE_EXACTNESS = Object.freeze(["exact", "approximate"] as const);
 
 export type EngineExactness = (typeof ENGINE_EXACTNESS)[number];
 
 /** `none` keeps nothing after the process exits. `durable` survives a restart. */
-export const ENGINE_RECOVERY = ["none", "durable"] as const;
+export const ENGINE_RECOVERY = Object.freeze(["none", "durable"] as const);
 
 export type EngineRecovery = (typeof ENGINE_RECOVERY)[number];
 
 /** What one call reads. `per-call` is one consistent snapshot for that call and no state after it. */
-export const ENGINE_SNAPSHOTS = ["per-call"] as const;
+export const ENGINE_SNAPSHOTS = Object.freeze(["per-call"] as const);
 
 export type EngineSnapshot = (typeof ENGINE_SNAPSHOTS)[number];
+
+const FIELD_TYPES = Object.freeze(["string", "integer", "timestamp"] as const satisfies readonly FieldType[]);
+
+/**
+ * A store registered with an engine. Only the operations named on its descriptor are required.
+ * Callers check the descriptor before invoking a method. This is not a full `Store`.
+ */
+export type EngineStore = {
+  [Operation in EngineOperation]?: Store[Operation];
+};
 
 const ENGINE_ID = /^[A-Za-z][A-Za-z0-9_-]{0,62}$/;
 const ENGINE_KIND = /^[a-z][a-z0-9-]{0,62}$/;
@@ -80,16 +91,19 @@ export interface EngineDescriptor {
   resourceProfile?: string;
 }
 
-/** One registered engine. `descriptor` is a copy the caller may mutate. */
+/**
+ * One registered engine. `descriptor` is a copy the caller may mutate.
+ * `store` guarantees only the operations that descriptor lists.
+ */
 export interface RegisteredEngine {
   id: string;
-  store: Store;
+  store: EngineStore;
   descriptor: EngineDescriptor;
 }
 
 interface StoredEngine {
   id: string;
-  store: Store;
+  store: EngineStore;
   descriptor: EngineDescriptor;
 }
 
@@ -100,7 +114,7 @@ interface StoredEngine {
 export class EngineRegistry {
   private readonly engines = new Map<string, StoredEngine>();
 
-  register(id: string, store: Store, descriptor: EngineDescriptor): void {
+  register(id: string, store: EngineStore, descriptor: EngineDescriptor): void {
     const engineId = parseEngineId(id);
     const storedDescriptor = parseEngineDescriptor(descriptor);
     const engineStore = parseEngineStore(store, storedDescriptor.operations);
@@ -153,7 +167,7 @@ export function memoryStoreDescriptor(): EngineDescriptor {
     kind: "memory",
     roles: ["write-authority"],
     operations: [...ENGINE_OPERATIONS],
-    fieldTypes: ["string", "integer", "timestamp"],
+    fieldTypes: [...FIELD_TYPES],
     exactness: "exact",
     ordering: true,
     snapshot: "per-call",
@@ -307,11 +321,10 @@ function parseOperations(operations: unknown): readonly EngineOperation[] {
 
 function parseFieldTypes(fieldTypes: unknown): readonly FieldType[] {
   const values = parseStringList(fieldTypes, "fieldTypes");
-  const allowed: readonly FieldType[] = ["string", "integer", "timestamp"];
   const parsed: FieldType[] = [];
 
   for (const fieldType of values) {
-    if (!isListed(fieldType, allowed)) {
+    if (!isListed(fieldType, FIELD_TYPES)) {
       throw new LamedError(
         "invalid_argument",
         `Unknown field type "${preview(fieldType)}". Expected "string", "integer", or "timestamp".`,
@@ -389,7 +402,7 @@ function parseStringList(value: unknown, parameter: string): string[] {
   return parsed;
 }
 
-function parseEngineStore(store: unknown, operations: readonly EngineOperation[]): Store {
+function parseEngineStore(store: unknown, operations: readonly EngineOperation[]): EngineStore {
   if (store === null || typeof store !== "object" || Array.isArray(store)) {
     throw new LamedError("invalid_argument", "Engine store must be an object.", { parameter: "store" });
   }
@@ -405,7 +418,7 @@ function parseEngineStore(store: unknown, operations: readonly EngineOperation[]
     }
   }
 
-  return store as Store;
+  return store as EngineStore;
 }
 
 function mutableDescriptor(descriptor: EngineDescriptor): EngineDescriptor {
