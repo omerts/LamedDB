@@ -41,6 +41,8 @@ export interface ResolvedRoute {
   store: EngineStore;
   generation: number;
   epoch: number;
+  /** Operations this engine lists. Callers must not invoke any other method. */
+  operations: readonly EngineOperation[];
 }
 
 const REQUEST_FIELDS = new Set(["operation", "collection", "scope", "consistency", "deadline"]);
@@ -64,6 +66,10 @@ export class Router {
 
     if (!(catalog instanceof Catalog)) {
       throw new LamedError("invalid_argument", "Router requires a Catalog.");
+    }
+
+    if (!catalog.usesRegistry(registry)) {
+      throw new LamedError("invalid_argument", "Router catalog must use the same registry.");
     }
 
     this.registry = registry;
@@ -91,6 +97,7 @@ export class Router {
       store: registered.store,
       generation: pinned.generation,
       epoch: owner.epoch,
+      operations: Object.freeze([...registered.descriptor.operations]),
     };
   }
 }

@@ -270,25 +270,96 @@ describe("request router", () => {
     }
   });
 
-  it("does not substitute another engine when the writer is not in the router registry", () => {
+  it("rejects a catalog that does not use the router's registry", () => {
     const catalogRegistry = new EngineRegistry();
-    const routerRegistry = new EngineRegistry();
+    const sameIdRegistry = new EngineRegistry();
+    const otherIdRegistry = new EngineRegistry();
     const memory = countingStore();
+    const sameId = countingStore();
     const decoy = countingStore();
 
     catalogRegistry.register("memory", memory.store, memoryStoreDescriptor());
-    routerRegistry.register("other", decoy.store, memoryStoreDescriptor());
+    sameIdRegistry.register("memory", sameId.store, memoryStoreDescriptor());
+    otherIdRegistry.register("other", decoy.store, memoryStoreDescriptor());
 
-    const router = new Router(routerRegistry, new Catalog(catalogRegistry, "memory"));
+    const catalog = new Catalog(catalogRegistry, "memory");
 
-    expect(() => router.resolve(logical("putRecord"))).toThrow(
-      expect.objectContaining({
-        code: "internal",
-        message: 'No qualified route for operation "putRecord".',
-      }),
-    );
+    expectInvalid(() => new Router(sameIdRegistry, catalog), /same registry/);
+    expectInvalid(() => new Router(otherIdRegistry, catalog), /same registry/);
     expect(memory.calls()).toBe(0);
+    expect(sameId.calls()).toBe(0);
     expect(decoy.calls()).toBe(0);
+    expect(new Router(catalogRegistry, catalog).resolve(logical("getRecord")).store).toBe(memory.store);
+  });
+
+  it("does not call storage when a record engine omits getCollection", async () => {
+    const recordOperations = ["putRecord", "getRecord", "deleteRecord", "listRecords"] as const;
+
+    for (const operation of recordOperations) {
+      for (const hideGetCollection of [false, true]) {
+        let calls = 0;
+        const touch = async (): Promise<never> => {
+          calls += 1;
+
+          throw new Error("store was called");
+        };
+        const store = {
+          createCollection: touch,
+          deleteCollection: touch,
+          putRecord: touch,
+          getRecord: touch,
+          deleteRecord: touch,
+          listRecords: touch,
+          ...(hideGetCollection ? {} : { getCollection: touch }),
+        } as EngineStore;
+        const descriptor = memoryStoreDescriptor();
+
+        descriptor.operations = ENGINE_OPERATIONS.filter((item) => item !== "getCollection");
+
+        const registry = new EngineRegistry();
+
+        registry.register("memory", store, descriptor);
+
+        let routed = false;
+        const service = new CollectionService(new Router(registry, new Catalog(registry, "memory")), {
+          onRoute() {
+            routed = true;
+          },
+        });
+
+        await expect(runUseCase(service, operation)).rejects.toMatchObject({
+          code: "internal",
+          status: 500,
+          message: 'No qualified route for operation "getCollection".',
+        });
+        expect(calls).toBe(0);
+        expect(routed).toBe(false);
+      }
+    }
+
+    let reads = 0;
+    const creating = {
+      createCollection: async (name: string) => ({ name, fields: { status: "string" } }),
+      getCollection: async () => {
+        reads += 1;
+
+        return null;
+      },
+    } as EngineStore;
+    const descriptor = memoryStoreDescriptor();
+
+    descriptor.operations = ["createCollection"];
+
+    const registry = new EngineRegistry();
+
+    registry.register("memory", creating, descriptor);
+
+    const service = new CollectionService(new Router(registry, new Catalog(registry, "memory")));
+
+    await expect(service.createCollection("orders", { fields: { status: "string" } })).resolves.toMatchObject({
+      name: "orders",
+    });
+    expect(reads).toBe(0);
   });
 
   it("rejects a logical request that is not the documented shape and leaves the catalog unchanged", () => {

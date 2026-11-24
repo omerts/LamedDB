@@ -59,16 +59,16 @@ export class CollectionService {
     const fields = parseFieldDeclarations(spec.fields);
     const aliases = parseAliasDeclarations(spec.aliases, fields);
 
-    const store = this.open("createCollection", collectionName);
+    const route = this.open("createCollection", collectionName);
 
-    return requireMethod(store, "createCollection")(collectionName, fields, aliases);
+    return requireMethod(route, "createCollection")(collectionName, fields, aliases);
   }
 
   async deleteCollection(name: string): Promise<void> {
     const collectionName = parseCollectionName(name);
 
-    const store = this.open("deleteCollection", collectionName);
-    const deleted = await requireMethod(store, "deleteCollection")(collectionName);
+    const route = this.open("deleteCollection", collectionName);
+    const deleted = await requireMethod(route, "deleteCollection")(collectionName);
 
     if (!deleted) {
       throw new LamedError("not_found", `Collection "${collectionName}" does not exist.`);
@@ -85,13 +85,13 @@ export class CollectionService {
     const collectionName = parseCollectionName(name);
     const recordId = parseRecordId(id);
 
-    const store = this.open("putRecord", collectionName);
-    const collection = await this.requireCollection(store, collectionName);
+    const route = this.open("putRecord", collectionName, ["getCollection"]);
+    const collection = await this.requireCollection(route, collectionName);
 
     const document = validateDocument(data, collection.fields);
     const idempotency = idempotentPut(putOptions, recordId, document);
 
-    return requireMethod(store, "putRecord")({
+    return requireMethod(route, "putRecord")({
       collection: collectionName,
       id: recordId,
       data: document,
@@ -106,11 +106,11 @@ export class CollectionService {
     const collectionName = parseCollectionName(name);
     const recordId = parseRecordId(id);
 
-    const store = this.open("getRecord", collectionName);
+    const route = this.open("getRecord", collectionName, ["getCollection"]);
 
-    await this.requireCollection(store, collectionName);
+    await this.requireCollection(route, collectionName);
 
-    const record = await requireMethod(store, "getRecord")(collectionName, recordId);
+    const record = await requireMethod(route, "getRecord")(collectionName, recordId);
 
     if (!record) {
       throw new LamedError(
@@ -126,11 +126,11 @@ export class CollectionService {
     const collectionName = parseCollectionName(name);
     const recordId = parseRecordId(id);
 
-    const store = this.open("deleteRecord", collectionName);
+    const route = this.open("deleteRecord", collectionName, ["getCollection"]);
 
-    await this.requireCollection(store, collectionName);
+    await this.requireCollection(route, collectionName);
 
-    const deleted = await requireMethod(store, "deleteRecord")(collectionName, recordId);
+    const deleted = await requireMethod(route, "deleteRecord")(collectionName, recordId);
 
     if (!deleted) {
       throw new LamedError(
@@ -148,11 +148,11 @@ export class CollectionService {
   async listRecords(name: string, options?: unknown): Promise<ListResult> {
     const collectionName = parseCollectionName(name);
 
-    const store = this.open("listRecords", collectionName);
-    const collection = await this.requireCollection(store, collectionName);
+    const route = this.open("listRecords", collectionName, ["getCollection"]);
+    const collection = await this.requireCollection(route, collectionName);
     const query = parseListQuery(options, collection);
 
-    const page = await requireMethod(store, "listRecords")({
+    const page = await requireMethod(route, "listRecords")({
       collection: collectionName,
       collectionRevision: collection.revision,
       filters: query.filters,
@@ -171,22 +171,33 @@ export class CollectionService {
     };
   }
 
-  private open(operation: EngineOperation, collection: string): EngineStore {
+  private open(
+    operation: EngineOperation,
+    collection: string,
+    also: readonly EngineOperation[] = [],
+  ): ResolvedRoute {
     const route = this.router.resolve({
       operation,
       collection,
       scope: "default",
       consistency: "strong",
     });
-    const store = route.store;
+
+    for (const required of [operation, ...also]) {
+      if (!route.operations.includes(required)) {
+        throw new LamedError("internal", `No qualified route for operation "${required}".`, {
+          operation: required,
+        });
+      }
+    }
 
     this.onRoute?.(route);
 
-    return store;
+    return route;
   }
 
-  private async requireCollection(store: EngineStore, name: string): Promise<CollectionState> {
-    const collection = await requireMethod(store, "getCollection")(name);
+  private async requireCollection(route: ResolvedRoute, name: string): Promise<CollectionState> {
+    const collection = await requireMethod(route, "getCollection")(name);
 
     if (!collection) {
       throw new LamedError("not_found", `Collection "${name}" does not exist.`);
@@ -197,18 +208,18 @@ export class CollectionService {
 }
 
 function requireMethod<K extends EngineOperation>(
-  store: EngineStore,
+  route: ResolvedRoute,
   operation: K,
 ): NonNullable<EngineStore[K]> {
-  const method = store[operation];
+  const method = route.store[operation];
 
-  if (typeof method !== "function") {
+  if (!route.operations.includes(operation) || typeof method !== "function") {
     throw new LamedError("internal", `No qualified route for operation "${operation}".`, {
       operation,
     });
   }
 
-  return method.bind(store) as NonNullable<EngineStore[K]>;
+  return method.bind(route.store) as NonNullable<EngineStore[K]>;
 }
 
 function parseServiceOptions(options: unknown): CollectionServiceOptions {
