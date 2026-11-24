@@ -54,11 +54,16 @@ function isCompletedSuccess(record) {
   return record?.status === "completed" && record?.conclusion === "success";
 }
 
+function hasSettledOutcomes(record) {
+  return record?.status === "completed" && typeof record.conclusion === "string" && record.conclusion !== "cancelled";
+}
+
 function acceptCheckResults(run, jobs) {
   const job = (jobs || []).find((item) => item.name === "checks") || null;
+  const steps = checksFromJobs(jobs);
 
   if (isCompletedSuccess(run) && isCompletedSuccess(job)) {
-    return { checks: checksFromJobs(jobs), reason: null };
+    return { checks: steps, reason: null, reportSteps: true };
   }
 
   const problems = [];
@@ -71,9 +76,12 @@ function acceptCheckResults(run, jobs) {
     problems.push(`job is ${job?.status || "missing"}/${job?.conclusion || "none"}`);
   }
 
+  const reportSteps = hasSettledOutcomes(run) && hasSettledOutcomes(job);
+
   return {
-    checks: emptyChecks(),
+    checks: reportSteps ? steps : emptyChecks(),
     reason: `Readiness checks ${problems.join(" and ")}, not completed/success`,
+    reportSteps,
   };
 }
 
@@ -187,13 +195,17 @@ export function assess(input) {
   const notes = [];
   const checks = { ...emptyChecks(), ...input.checks };
 
-  if (input.checksRejected) {
-    reasons.push(input.checksRejected);
-  } else if (input.checksMismatch) {
+  if (input.checksMismatch) {
     reasons.push(
       `Readiness checks ran for ${input.checksMismatch.runSha}, not the pull request head ${input.checksMismatch.headSha}`,
     );
+  } else if (input.checksRejected && !input.reportStepOutcomes) {
+    reasons.push(input.checksRejected);
   } else {
+    if (input.checksRejected) {
+      reasons.push(input.checksRejected);
+    }
+
     reasons.push(...checkReasons(checks));
 
     if (input.checksMissing) {
@@ -544,6 +556,7 @@ async function loadChecks(get, env, repo, headSha, limits) {
     truncated: jobs.truncated,
     mismatch: null,
     rejected: accepted.reason,
+    reportSteps: accepted.reportSteps,
   };
 }
 
@@ -635,6 +648,7 @@ export async function run(env, fetchImpl = globalThis.fetch, options = {}) {
       checksTruncated: checksResult.truncated,
       checksMismatch: checksResult.mismatch,
       checksRejected: checksResult.rejected,
+      reportStepOutcomes: checksResult.reportSteps,
       prNumber: number,
       pr,
       headCommittedAt: commit.commit?.committer?.date || "",

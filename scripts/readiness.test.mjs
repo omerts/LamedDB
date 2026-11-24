@@ -580,6 +580,28 @@ describe("check run acceptance", () => {
     assert.equal(result.reasons.some((item) => item.startsWith('Check "')), false);
   });
 
+  it("names a failed typecheck when the checks run completed unsuccessfully", async () => {
+    const result = await assessRun(
+      { status: "completed", conclusion: "failure" },
+      {
+        status: "completed",
+        conclusion: "failure",
+        steps: [
+          { name: "Install", conclusion: "success" },
+          { name: "Typecheck", conclusion: "failure" },
+          { name: "Build", conclusion: "skipped" },
+          { name: "Tests", conclusion: "skipped" },
+        ],
+      },
+    );
+
+    reason(result, 'Check "typecheck" failure');
+    reason(result, "run is completed/failure and job is completed/failure, not completed/success");
+    assert.equal(result.checks.typecheck, "failure");
+    assert.equal(result.checks.install, "success");
+    assert.notEqual(result.verdict, "READY");
+  });
+
   it("does not accept succeeded steps when the checks job is incomplete", async () => {
     const result = await assessRun(
       { status: "completed", conclusion: "success" },
