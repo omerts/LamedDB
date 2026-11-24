@@ -1,5 +1,23 @@
 export { CollectionService } from "./collections/service.js";
 export type { PutOutcome } from "./collections/service.js";
+export {
+  ENGINE_EXACTNESS,
+  ENGINE_OPERATIONS,
+  ENGINE_RECOVERY,
+  ENGINE_ROLES,
+  ENGINE_SNAPSHOTS,
+  EngineRegistry,
+  memoryStoreDescriptor,
+} from "./engine/registry.js";
+export type {
+  EngineDescriptor,
+  EngineExactness,
+  EngineOperation,
+  EngineRecovery,
+  EngineRole,
+  EngineSnapshot,
+  RegisteredEngine,
+} from "./engine/registry.js";
 export { LamedError } from "./errors.js";
 export type { ErrorCode } from "./errors.js";
 export { listen } from "./http/server.js";
