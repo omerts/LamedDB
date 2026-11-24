@@ -19,7 +19,7 @@
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && node --test scripts/readiness.test.mjs",
     "mcp": "tsx src/mcp/main.ts",
     "start:mcp": "node dist/mcp/main.js"
   },
