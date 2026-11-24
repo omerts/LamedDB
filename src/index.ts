@@ -19,6 +19,13 @@ export type {
   EngineSnapshot,
   RegisteredEngine,
 } from "./engine/registry.js";
+export { Catalog, resolveWriter } from "./engine/catalog.js";
+export type {
+  CatalogChange,
+  CatalogGeneration,
+  OwnershipEntry,
+  ReadRepresentation,
+} from "./engine/catalog.js";
 export { LamedError } from "./errors.js";
 export type { ErrorCode } from "./errors.js";
 export { listen } from "./http/server.js";
