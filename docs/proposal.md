@@ -81,7 +81,7 @@ const totals = await orders.query({
 
 ## Dynamic storage and cloud architecture
 
-**Layout and placement.** A versioned catalog maps each partition to one write authority. The pilot uses managed PostgreSQL, with a fixed hash of `tenant_id` routing each collection to one of up to eight shared bucket tables. There are no per-tenant tables. Cap a workspace at 16 collections and each collection at one extra migration or rollback table, for at most 144 record tables plus rollups and shared metadata. The first move rewrites packed JSON into typed columns plus residual JSON. [Adaptive engine](#dynamic-storage-and-cloud-architecture)
+**Layout and placement.** A versioned catalog maps each partition to one write authority. The pilot uses managed PostgreSQL, with a fixed hash of `tenant_id` routing each collection to one of up to eight shared bucket tables. There are no per-tenant tables. Cap a workspace at 16 collections and each collection at one extra migration or rollback table, for at most 144 record tables plus rollups and shared metadata. The first move rewrites packed JSON into typed columns plus residual JSON. [Adaptive engine](multi-engine-plan.md)
 
 **Exact rollup.** Update the pilot's `COUNT` and `SUM` rollup in the same PostgreSQL transaction as each record mutation. Apply deltas from the actual old and new values, including deletes and moves between UTC-day or status buckets. At one primary snapshot, route supported whole-day aggregates to the ready rollup and use authoritative rows for other shapes. Charge the extra writes and hot-bucket contention. Async projections remain candidates for later, if they can merge a complete change tail or serve an explicit staleness contract. [PostgreSQL snapshots](https://www.postgresql.org/docs/18/transaction-iso.html)
 
@@ -89,7 +89,7 @@ const totals = await orders.query({
 
 **Cloud and recovery.** Run regional request, stream, and migration pools with separate resource budgets. Require verified synchronous durability to the eligible standby and target zero loss of acknowledged work with recovery within five minutes for one availability-zone failure. Target at most five minutes of archive lag and a 60-minute point-in-time restore at pilot scale. Restore catalog, records, receipts, and stream state to one PostgreSQL recovery point and invalidate pre-restore stream cursors. These are drill targets. [Synchronous replication](https://www.postgresql.org/docs/18/warm-standby.html#SYNCHRONOUS-REPLICATION), [PostgreSQL point-in-time recovery](https://www.postgresql.org/docs/18/continuous-archiving.html)
 
-**Planner.** Use measured costs and simple rules for the pilot. Require a minimum projected gain across two evaluation windows, a cooldown, and at most one planned change per partition per rolling hour. Revert automatically during validation when outcomes breach the regression limits. Exempt safety reverts from the change budget. Defer learned cost models until after the pilot. [Planner and migration details](#dynamic-storage-and-cloud-architecture)
+**Planner.** Use measured costs and simple rules for the pilot. Require a minimum projected gain across two evaluation windows, a cooldown, and at most one planned change per partition per rolling hour. Revert automatically during validation when outcomes breach the regression limits. Exempt safety reverts from the change budget. Defer learned cost models until after the pilot. [Planner and migration details](multi-engine-plan.md)
 
 ## Streaming, events, and MCP
 
