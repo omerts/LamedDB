@@ -132,6 +132,133 @@ export function parsePutOptions(options: unknown): {
 
 const STORE_OPTIONS = new Set(["now", "idempotencyTtlMs", "maxIdempotencyKeys"]);
 
+const POSTGRES_STORE_OPTIONS = new Set([
+  "connectionString",
+  "schema",
+  "pool",
+  "now",
+  "idempotencyTtlMs",
+  "maxIdempotencyKeys",
+]);
+
+const SCHEMA_NAME = /^[a-z_][a-z0-9_]{0,62}$/;
+
+export interface PostgresStoreConfig {
+  connectionString: string;
+  schema: string;
+  pool: unknown;
+  now: () => number;
+  idempotencyTtlMs: number;
+  maxIdempotencyKeys: number;
+}
+
+/**
+ * Runtime check for PostgresStore options. Unknown options are rejected, not ignored.
+ * Errors name the field and never include the database URL.
+ */
+export function parsePostgresStoreOptions(options: unknown): PostgresStoreConfig {
+  if (!isPlainObject(options)) {
+    throw new LamedError("invalid_argument", "PostgresStore options must be an object.");
+  }
+
+  for (const key of Reflect.ownKeys(options)) {
+    if (typeof key !== "string" || !POSTGRES_STORE_OPTIONS.has(key)) {
+      throw new LamedError("invalid_argument", `Unknown store option "${optionKeyName(key)}".`);
+    }
+  }
+
+  const connectionString = options.connectionString;
+
+  if (typeof connectionString !== "string" || connectionString.trim() === "") {
+    throw new LamedError("invalid_argument", "Database URL must be a non-empty string.", {
+      parameter: "connectionString",
+    });
+  }
+
+  const now = options.now;
+
+  if (now !== undefined && typeof now !== "function") {
+    throw new LamedError("invalid_argument", "Clock must be a function.", { parameter: "now" });
+  }
+
+  if (options.pool !== undefined && !isPoolLike(options.pool)) {
+    throw new LamedError("invalid_argument", "Database pool must be an object with a connect function.", {
+      parameter: "pool",
+    });
+  }
+
+  return {
+    connectionString: connectionString.trim(),
+    schema: parseSchemaName(options.schema),
+    pool: options.pool,
+    now: typeof now === "function" ? (now as () => number) : Date.now,
+    idempotencyTtlMs: parsePositiveInteger(
+      options.idempotencyTtlMs,
+      "idempotencyTtlMs",
+      LIMITS.idempotencyTtlMs,
+    ),
+    maxIdempotencyKeys: parsePositiveInteger(
+      options.maxIdempotencyKeys,
+      "maxIdempotencyKeys",
+      LIMITS.maxIdempotencyKeysPerCollection,
+    ),
+  };
+}
+
+/** Read `LAMEDDB_DATABASE_URL`. Unset means the in-memory store. The value is never copied into an error. */
+export function databaseUrlFromEnv(env: { LAMEDDB_DATABASE_URL?: unknown }): string | undefined {
+  if (env === null || typeof env !== "object") {
+    throw new LamedError("invalid_argument", "Environment must be an object.");
+  }
+
+  const raw = env.LAMEDDB_DATABASE_URL;
+
+  if (raw === undefined) {
+    return undefined;
+  }
+
+  if (typeof raw !== "string") {
+    throw new LamedError("invalid_argument", "LAMEDDB_DATABASE_URL must be a string.");
+  }
+
+  if (raw.trim() === "") {
+    throw new LamedError(
+      "invalid_argument",
+      "LAMEDDB_DATABASE_URL is set but empty. Unset it to use the in-memory store, or set a PostgreSQL URL.",
+    );
+  }
+
+  return raw.trim();
+}
+
+function parseSchemaName(value: unknown): string {
+  if (value === undefined) {
+    return "lameddb";
+  }
+
+  if (typeof value !== "string") {
+    throw new LamedError("invalid_argument", "Schema name must be a string.", { parameter: "schema" });
+  }
+
+  if (SCHEMA_NAME.test(value)) {
+    return value;
+  }
+
+  throw new LamedError(
+    "invalid_argument",
+    `Schema name "${preview(value)}" is not allowed. Use a letter or underscore, then letters, digits, or underscores, up to 63 characters.`,
+    { parameter: "schema" },
+  );
+}
+
+function isPoolLike(value: unknown): boolean {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+
+  return typeof (value as { connect?: unknown }).connect === "function";
+}
+
 export interface MemoryStoreRetention {
   now: () => number;
   idempotencyTtlMs: number;
