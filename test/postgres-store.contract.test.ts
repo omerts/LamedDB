@@ -161,14 +161,7 @@ if (testDatabaseUrl === undefined) {
 
     schemas.push(schema);
 
-    const store = new PostgresStore({
-      connectionString: databaseUrl,
-      schema,
-      pool,
-      now: options?.now,
-      idempotencyTtlMs: options?.idempotencyTtlMs,
-      maxIdempotencyKeys: options?.maxIdempotencyKeys,
-    });
+    const store = new PostgresStore(contractStoreOptions(databaseUrl, schema, pool, options));
 
     await store.migrate();
 
@@ -352,14 +345,7 @@ if (testDatabaseUrl === undefined) {
 
     schemas.push(schema);
 
-    const store = new PostgresStore({
-      connectionString: databaseUrl,
-      schema,
-      pool,
-      now: options.now,
-      idempotencyTtlMs: options.idempotencyTtlMs,
-      maxIdempotencyKeys: options.maxIdempotencyKeys,
-    });
+    const store = new PostgresStore(contractStoreOptions(databaseUrl, schema, pool, options));
 
     await store.migrate();
 
@@ -441,6 +427,29 @@ function runCli(env: NodeJS.ProcessEnv): Promise<{ code: number | null; stdout: 
   });
 
   return collect(child);
+}
+
+function contractStoreOptions(
+  connectionString: string,
+  schema: string,
+  pool: Pool,
+  options: StoreContractOptions | undefined,
+): PostgresStoreOptions {
+  const parsed: PostgresStoreOptions = { connectionString, schema, pool };
+
+  if (options !== undefined && options.now !== undefined) {
+    parsed.now = options.now;
+  }
+
+  if (options !== undefined && options.idempotencyTtlMs !== undefined) {
+    parsed.idempotencyTtlMs = options.idempotencyTtlMs;
+  }
+
+  if (options !== undefined && options.maxIdempotencyKeys !== undefined) {
+    parsed.maxIdempotencyKeys = options.maxIdempotencyKeys;
+  }
+
+  return parsed;
 }
 
 function collect(child: ChildProcess): Promise<{ code: number | null; stdout: string; stderr: string }> {

@@ -29,25 +29,68 @@ export function emptyChecks() {
   };
 }
 
+const CHECKS_JOB_NAME = /^checks(?: \([^)]+\))?$/;
+
+const OUTCOME_RANK = {
+  failure: 0,
+  cancelled: 1,
+  timed_out: 2,
+  startup_failure: 3,
+  action_required: 4,
+  skipped: 5,
+  in_progress: 6,
+  queued: 7,
+  pending: 8,
+  missing: 9,
+  success: 10,
+};
+
 export function checksFromJobs(jobs) {
   const checks = emptyChecks();
-  const job = (jobs || []).find((item) => item.name === "checks");
+  const matched = checksJobs(jobs);
 
-  if (!job) {
+  if (matched.length === 0) {
     return checks;
   }
 
-  for (const step of job.steps || []) {
-    const key = STEP_NAMES[step.name];
-
-    if (!key) {
-      continue;
-    }
-
-    checks[key] = stepOutcome(step);
+  for (const key of REQUIRED_CHECKS) {
+    checks[key] = combineOutcomes(matched.map((job) => outcomeForStep(job, key)));
   }
 
   return checks;
+}
+
+function checksJobs(jobs) {
+  return (jobs || [])
+    .filter((item) => typeof item?.name === "string" && CHECKS_JOB_NAME.test(item.name))
+    .slice()
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function outcomeForStep(job, key) {
+  const stepName = Object.entries(STEP_NAMES).find(([, value]) => value === key)?.[0];
+  const step = (job.steps || []).find((item) => item.name === stepName);
+
+  if (!step) {
+    return "missing";
+  }
+
+  return stepOutcome(step);
+}
+
+function combineOutcomes(outcomes) {
+  let selected = "success";
+
+  for (const outcome of outcomes) {
+    const current = OUTCOME_RANK[selected] ?? 0;
+    const next = OUTCOME_RANK[outcome] ?? 0;
+
+    if (next < current) {
+      selected = outcome;
+    }
+  }
+
+  return selected;
 }
 
 function isCompletedSuccess(record) {
@@ -58,11 +101,32 @@ function hasSettledOutcomes(record) {
   return record?.status === "completed" && typeof record.conclusion === "string" && record.conclusion !== "cancelled";
 }
 
-function acceptCheckResults(run, jobs) {
-  const job = (jobs || []).find((item) => item.name === "checks") || null;
-  const steps = checksFromJobs(jobs);
+function jobProblem(matched) {
+  if (matched.length === 0) {
+    return "job is missing/none";
+  }
 
-  if (isCompletedSuccess(run) && isCompletedSuccess(job)) {
+  const pending = matched.filter((job) => !isCompletedSuccess(job));
+
+  if (pending.length === 0) {
+    return "job is missing/none";
+  }
+
+  if (matched.length === 1) {
+    return `job is ${pending[0].status || "missing"}/${pending[0].conclusion || "none"}`;
+  }
+
+  return `job is ${pending
+    .map((job) => `${job.name} ${job.status || "missing"}/${job.conclusion || "none"}`)
+    .join(" and ")}`;
+}
+
+function acceptCheckResults(run, jobs) {
+  const matched = checksJobs(jobs);
+  const steps = checksFromJobs(jobs);
+  const jobsOk = matched.length > 0 && matched.every((job) => isCompletedSuccess(job));
+
+  if (isCompletedSuccess(run) && jobsOk) {
     return { checks: steps, reason: null, reportSteps: true };
   }
 
@@ -72,11 +136,11 @@ function acceptCheckResults(run, jobs) {
     problems.push(`run is ${run?.status || "missing"}/${run?.conclusion || "none"}`);
   }
 
-  if (!isCompletedSuccess(job)) {
-    problems.push(`job is ${job?.status || "missing"}/${job?.conclusion || "none"}`);
+  if (!jobsOk) {
+    problems.push(jobProblem(matched));
   }
 
-  const reportSteps = hasSettledOutcomes(run) && hasSettledOutcomes(job);
+  const reportSteps = hasSettledOutcomes(run) && matched.length > 0 && matched.every((job) => hasSettledOutcomes(job));
 
   return {
     checks: reportSteps ? steps : emptyChecks(),

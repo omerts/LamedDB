@@ -119,19 +119,26 @@ describe("API key authentication", () => {
 
     try {
       for (const route of routes) {
-        const missing = await fetch(started.server.url + route.path, {
-          method: route.method,
-          headers: route.body === undefined ? {} : { "content-type": "application/json" },
-          body: route.body,
-        });
-        const wrong = await fetch(started.server.url + route.path, {
-          method: route.method,
-          headers: {
-            authorization: `Bearer ${OTHER_KEY}`,
-            ...(route.body === undefined ? {} : { "content-type": "application/json" }),
-          },
-          body: route.body,
-        });
+        const missingHeaders: Record<string, string> =
+          route.body === undefined ? {} : { "content-type": "application/json" };
+        const missingInit: RequestInit = { method: route.method, headers: missingHeaders };
+
+        if (route.body !== undefined) {
+          missingInit.body = route.body;
+        }
+
+        const missing = await fetch(started.server.url + route.path, missingInit);
+        const wrongHeaders: Record<string, string> = {
+          authorization: `Bearer ${OTHER_KEY}`,
+          ...(route.body === undefined ? {} : { "content-type": "application/json" }),
+        };
+        const wrongInit: RequestInit = { method: route.method, headers: wrongHeaders };
+
+        if (route.body !== undefined) {
+          wrongInit.body = route.body;
+        }
+
+        const wrong = await fetch(started.server.url + route.path, wrongInit);
 
         await expectUnauthenticated(missing, [API_KEY, OTHER_KEY]);
         await expectUnauthenticated(wrong, [API_KEY, OTHER_KEY]);

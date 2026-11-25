@@ -253,7 +253,7 @@ async function route(
 
     const outcome = await service.putRecord(name, id, await readJsonBody(req), {
       createOnly,
-      ifVersion,
+      ...(ifVersion !== undefined ? { ifVersion } : {}),
       ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     });
 

@@ -2,7 +2,7 @@ import { Catalog } from "./engine/catalog.js";
 import { EngineRegistry, postgresStoreDescriptor } from "./engine/registry.js";
 import { Router } from "./engine/router.js";
 import { CollectionService } from "./collections/service.js";
-import { listen } from "./http/server.js";
+import { listen, type ListenOptions } from "./http/server.js";
 import { MemoryStore } from "./storage/memory-store.js";
 import { PostgresStore } from "./storage/postgres-store.js";
 import { apiKeysFromEnv, databaseUrlFromEnv, idempotencyRetentionFromEnv } from "./validate.js";
@@ -14,13 +14,16 @@ const apiKeys = apiKeysFromEnv(process.env);
 const databaseUrl = databaseUrlFromEnv(process.env);
 const backend = await openBackend(databaseUrl, retention);
 
+const listenOptions: ListenOptions = { port, host, apiKeys };
+
+if (backend.kind === "postgres") {
+  listenOptions.service = backend.service;
+} else {
+  listenOptions.store = backend.store;
+}
+
 try {
-  const running = await listen({
-    port,
-    host,
-    apiKeys,
-    ...(backend.service !== undefined ? { service: backend.service } : { store: backend.store }),
-  });
+  const running = await listen(listenOptions);
 
   console.log(`LamedDB listening on ${running.url}`);
 
@@ -40,11 +43,9 @@ try {
   throw error;
 }
 
-interface OpenBackend {
-  store?: MemoryStore;
-  service?: CollectionService;
-  close(): Promise<void>;
-}
+type OpenBackend =
+  | { kind: "memory"; store: MemoryStore; close(): Promise<void> }
+  | { kind: "postgres"; service: CollectionService; close(): Promise<void> };
 
 async function openBackend(
   databaseUrl: string | undefined,
@@ -52,6 +53,7 @@ async function openBackend(
 ): Promise<OpenBackend> {
   if (databaseUrl === undefined) {
     return {
+      kind: "memory",
       store: new MemoryStore(retention),
       close: async () => {},
     };
@@ -86,6 +88,7 @@ async function openBackend(
   registry.register("postgres", store, postgresStoreDescriptor());
 
   return {
+    kind: "postgres",
     service: new CollectionService(new Router(registry, new Catalog(registry, "postgres"))),
     close: () => store.close(),
   };

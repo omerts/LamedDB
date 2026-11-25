@@ -1083,7 +1083,11 @@ async function walk(
   let after: ListPosition | undefined;
 
   for (let index = 0; index < 100; index += 1) {
-    const page = await list(store, stored, { ...input, sort, after });
+    const page = await list(store, stored, {
+      ...input,
+      sort,
+      ...(after !== undefined ? { after } : {}),
+    });
 
     if (onPage) {
       await onPage(page, index);

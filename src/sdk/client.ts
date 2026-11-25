@@ -1,5 +1,6 @@
 import { isErrorCode, LamedError } from "../errors.js";
 import type {
+  AliasMap,
   CollectionInfo,
   CollectionSpec,
   FilterScalar,
@@ -114,10 +115,24 @@ async function createCollection(
   };
 
   if (isPlainObject(parsed.aliases)) {
-    info.aliases = parsed.aliases as CollectionInfo["aliases"];
+    info.aliases = aliasMapFromPayload(parsed.aliases);
   }
 
   return info;
+}
+
+function aliasMapFromPayload(value: Record<string, unknown>): AliasMap {
+  const aliases: Record<string, string> = {};
+
+  for (const [name, target] of Object.entries(value)) {
+    if (typeof target !== "string") {
+      throw new LamedError("internal", "Server returned an unexpected collection payload.");
+    }
+
+    aliases[name] = target;
+  }
+
+  return aliases;
 }
 
 async function deleteCollection(transport: Transport, name: string): Promise<void> {
@@ -179,11 +194,16 @@ async function requestJson(
     requestHeaders["content-type"] = "application/json";
   }
 
-  const response = await transport.fetch(`${transport.baseUrl}${path}`, {
+  const init: RequestInit = {
     method,
     headers: requestHeaders,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  };
+
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+
+  const response = await transport.fetch(`${transport.baseUrl}${path}`, init);
   const text = await response.text();
   const parsed = text.length === 0 ? undefined : parseResponseJson(text);
 
