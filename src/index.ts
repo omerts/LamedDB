@@ -1,5 +1,5 @@
 export { CollectionService } from "./collections/service.js";
-export type { PutOutcome } from "./collections/service.js";
+export type { CollectionServiceOptions, PutOutcome } from "./collections/service.js";
 export {
   ENGINE_EXACTNESS,
   ENGINE_OPERATIONS,
@@ -20,6 +20,8 @@ export type {
   RegisteredEngine,
 } from "./engine/registry.js";
 export { Catalog, resolveWriter } from "./engine/catalog.js";
+export { Router, SINGLE_STORE_ENGINE_ID, routerForStore } from "./engine/router.js";
+export type { LogicalRequest, RequestConsistency, RequestScope, ResolvedRoute } from "./engine/router.js";
 export type {
   CatalogChange,
   CatalogGeneration,

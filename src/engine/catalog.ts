@@ -118,6 +118,11 @@ export class Catalog {
     return toPublicGeneration(this.head);
   }
 
+  /** True when `candidate` is the registry this catalog validates writers against. */
+  usesRegistry(candidate: EngineRegistry): boolean {
+    return candidate === this.registry;
+  }
+
   /**
    * Publish `change` only when `expectedGeneration` is still current.
    * A stale generation fails and leaves the catalog as it was.
