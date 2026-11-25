@@ -19,13 +19,25 @@ export async function startTestServer(
   options: Partial<Omit<ListenOptions, "apiKeys">> & { apiKeys?: readonly string[] } = {},
 ): Promise<TestServer> {
   const apiKeys = options.apiKeys ?? [TEST_API_KEY];
-  const server = await listen({
-    port: options.port,
-    host: options.host,
-    store: options.store,
-    service: options.service,
-    apiKeys,
-  });
+  const listenOptions: ListenOptions = { apiKeys };
+
+  if (options.port !== undefined) {
+    listenOptions.port = options.port;
+  }
+
+  if (options.host !== undefined) {
+    listenOptions.host = options.host;
+  }
+
+  if (options.store !== undefined) {
+    listenOptions.store = options.store;
+  }
+
+  if (options.service !== undefined) {
+    listenOptions.service = options.service;
+  }
+
+  const server = await listen(listenOptions);
   const apiKey = apiKeys[0] ?? TEST_API_KEY;
 
   return {

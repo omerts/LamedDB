@@ -452,6 +452,23 @@ describe("list records", () => {
       });
     });
 
+    it("rejects a collection payload whose alias target is not a string", async () => {
+      const client = new LamedDB({
+        baseUrl: running.url,
+        apiKey: TEST_API_KEY,
+        fetch: async () =>
+          new Response(JSON.stringify({ name: "aliased", fields: { a: "string" }, aliases: { b: 1 } }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      });
+
+      await expect(client.admin.createCollection("aliased")).rejects.toMatchObject({
+        code: "internal",
+        message: "Server returned an unexpected collection payload.",
+      });
+    });
+
     it("filters and sorts through an alias exactly like the real field", async () => {
       const viaAlias = await get("?filter[amount][gte]=300&sort=-amount");
       const viaField = await get("?filter[totalCents][gte]=300&sort=-totalCents");
@@ -610,7 +627,7 @@ describe("list records", () => {
         expect(body.error).toEqual({ code: "unauthenticated", message: "A valid API key is required." });
 
         // A request that promises a body and never sends it still gets its 401 straight away.
-        const early = await new Promise<number>((resolve, reject) => {
+        const early = await new Promise<number>((resolve) => {
           const request = httpRequest(
             `${guarded.server.url}${BASE}`,
             { method: "GET", headers: { "content-length": "1000" } },

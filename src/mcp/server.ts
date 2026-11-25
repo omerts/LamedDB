@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { LamedError } from "../errors.js";
 import { LamedDB } from "../sdk/client.js";
+import type { FilterOperators, FilterScalar, ListOptions } from "../types.js";
 import { LIMITS, isValidApiKey } from "../validate.js";
 
 export const DEFAULT_TIMEOUT_MS = 10_000;
@@ -107,8 +108,7 @@ export function createMcpServer(options: LamedMcpOptions): McpServer {
     },
     async (input: QueryRecordsInput) => {
       try {
-        const { collection, ...listOptions } = input;
-        const page = await db.collection(collection).list(listOptions);
+        const page = await db.collection(input.collection).list(listOptionsFromQuery(input));
 
         return { content: [{ type: "text" as const, text: JSON.stringify(page) }] };
       } catch (error) {
@@ -118,6 +118,89 @@ export function createMcpServer(options: LamedMcpOptions): McpServer {
   );
 
   return server;
+}
+
+function listOptionsFromQuery(input: QueryRecordsInput): ListOptions {
+  const options: ListOptions = {};
+
+  if (input.limit !== undefined) {
+    options.limit = input.limit;
+  }
+
+  if (input.cursor !== undefined) {
+    options.cursor = input.cursor;
+  }
+
+  if (input.sort !== undefined) {
+    options.sort = input.sort;
+  }
+
+  if (input.filter !== undefined) {
+    options.filter = filterFromQuery(input.filter);
+  }
+
+  return options;
+}
+
+function filterFromQuery(
+  filter: NonNullable<QueryRecordsInput["filter"]>,
+): NonNullable<ListOptions["filter"]> {
+  const result: Record<string, FilterScalar | FilterOperators> = {};
+
+  for (const [field, value] of Object.entries(filter)) {
+    if (value === undefined) {
+      continue;
+    }
+
+    if (value === null || typeof value === "string" || typeof value === "number") {
+      result[field] = value;
+      continue;
+    }
+
+    result[field] = operatorsFromQuery(value);
+  }
+
+  return result;
+}
+
+function operatorsFromQuery(
+  value: Exclude<NonNullable<NonNullable<QueryRecordsInput["filter"]>[string]>, FilterScalar | undefined>,
+): FilterOperators {
+  const operators: FilterOperators = {};
+
+  if (value.eq !== undefined) {
+    operators.eq = value.eq;
+  }
+
+  if (value.ne !== undefined) {
+    operators.ne = value.ne;
+  }
+
+  if (value.gt !== undefined) {
+    operators.gt = value.gt;
+  }
+
+  if (value.gte !== undefined) {
+    operators.gte = value.gte;
+  }
+
+  if (value.lt !== undefined) {
+    operators.lt = value.lt;
+  }
+
+  if (value.lte !== undefined) {
+    operators.lte = value.lte;
+  }
+
+  if (value.prefix !== undefined) {
+    operators.prefix = value.prefix;
+  }
+
+  if (value.in !== undefined) {
+    operators.in = value.in;
+  }
+
+  return operators;
 }
 
 /** Turn any failure into a short message. Never includes the API key or a raw stack. */

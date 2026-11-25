@@ -133,11 +133,13 @@ async function call(
     headers.set(name, value);
   }
 
-  const response = await fetch(`${baseUrl}${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const init: RequestInit = { method, headers };
+
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(`${baseUrl}${path}`, init);
   const text = await response.text();
 
   return {

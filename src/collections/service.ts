@@ -97,8 +97,8 @@ export class CollectionService {
       data: document,
       createOnly: putOptions.createOnly,
       collectionRevision: collection.revision,
-      ifVersion: putOptions.ifVersion,
-      idempotency,
+      ...(putOptions.ifVersion !== undefined ? { ifVersion: putOptions.ifVersion } : {}),
+      ...(idempotency !== undefined ? { idempotency } : {}),
     });
   }
 
@@ -157,8 +157,8 @@ export class CollectionService {
       collectionRevision: collection.revision,
       filters: query.filters,
       sort: query.sort,
-      after: query.after,
       limit: query.limit,
+      ...(query.after !== undefined ? { after: query.after } : {}),
     });
     const last = page.records[page.records.length - 1];
 

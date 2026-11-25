@@ -484,7 +484,7 @@ const SUCCESS_STEPS = [
   { name: "Tests", conclusion: "success" },
 ];
 
-function readyReviewFetch({ run, job, pullsForCommit }) {
+function readyReviewFetch({ run, job, jobs, pullsForCommit }) {
   return async (url, options = {}) => {
     const parsed = new URL(url);
     let body = [];
@@ -530,7 +530,7 @@ function readyReviewFetch({ run, job, pullsForCommit }) {
     } else if (parsed.pathname === "/repos/acme/db/actions/runs/9") {
       body = run;
     } else if (parsed.pathname.endsWith("/jobs")) {
-      body = { jobs: [job] };
+      body = { jobs: jobs ?? [job] };
     } else {
       throw new Error(`unexpected ${url}`);
     }
@@ -612,6 +612,74 @@ describe("check run acceptance", () => {
     assert.equal(result.checks.build, "missing");
     assert.notEqual(result.verdict, "READY");
   });
+
+  it("accepts every Node matrix leg when each one succeeded", async () => {
+    const result = await run(
+      env,
+      readyReviewFetch({
+        run: {
+          id: 9,
+          head_sha: HEAD,
+          path: ".github/workflows/readiness-checks.yml",
+          status: "completed",
+          conclusion: "success",
+        },
+        jobs: [
+          { name: "checks (22)", status: "completed", conclusion: "success", steps: SUCCESS_STEPS },
+          { name: "checks (24)", status: "completed", conclusion: "success", steps: SUCCESS_STEPS },
+        ],
+      }),
+    );
+
+    assert.equal(result.verdict, "READY");
+    assert.deepEqual(result.checks, {
+      install: "success",
+      typecheck: "success",
+      build: "success",
+      tests: "success",
+    });
+  });
+
+  it("rejects the matrix when one Node leg fails a step", async () => {
+    const result = await run(
+      env,
+      readyReviewFetch({
+        run: {
+          id: 9,
+          head_sha: HEAD,
+          path: ".github/workflows/readiness-checks.yml",
+          status: "completed",
+          conclusion: "failure",
+        },
+        jobs: [
+          {
+            name: "checks (24)",
+            status: "completed",
+            conclusion: "success",
+            steps: SUCCESS_STEPS,
+          },
+          {
+            name: "checks (22)",
+            status: "completed",
+            conclusion: "failure",
+            steps: [
+              { name: "Install", conclusion: "success" },
+              { name: "Typecheck", conclusion: "failure" },
+              { name: "Build", conclusion: "failure" },
+              { name: "Tests", conclusion: "success" },
+            ],
+          },
+        ],
+      }),
+    );
+
+    reason(result, 'Check "typecheck" failure');
+    reason(result, 'Check "build" failure');
+    reason(result, "job is checks (22) completed/failure");
+    assert.equal(result.checks.install, "success");
+    assert.equal(result.checks.tests, "success");
+    assert.notEqual(result.verdict, "READY");
+  });
 });
 
 function runAssessment(env, fetchImpl) {
@@ -682,6 +750,36 @@ describe("check steps", () => {
       install: "failure",
       typecheck: "skipped",
       build: "in_progress",
+      tests: "missing",
+    });
+  });
+
+  it("combines Node matrix legs and ignores jobs that are not checks", () => {
+    const checks = checksFromJobs([
+      { name: "verdict", steps: [{ name: "Install", conclusion: "failure" }] },
+      {
+        name: "checks (24)",
+        steps: [
+          { name: "Install", conclusion: "success" },
+          { name: "Typecheck", conclusion: "success" },
+          { name: "Build", conclusion: "success" },
+          { name: "Tests", conclusion: "success" },
+        ],
+      },
+      {
+        name: "checks (22)",
+        steps: [
+          { name: "Install", conclusion: "success" },
+          { name: "Typecheck", conclusion: "failure" },
+          { name: "Build", conclusion: "skipped" },
+        ],
+      },
+    ]);
+
+    assert.deepEqual(checks, {
+      install: "success",
+      typecheck: "failure",
+      build: "skipped",
       tests: "missing",
     });
   });

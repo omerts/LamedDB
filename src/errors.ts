@@ -42,7 +42,10 @@ export class LamedError extends Error {
     this.name = "LamedError";
     this.code = code;
     this.status = STATUS_BY_CODE[code];
-    this.details = details;
+
+    if (details !== undefined) {
+      this.details = details;
+    }
   }
 
   toJSON(): LamedErrorBody {
