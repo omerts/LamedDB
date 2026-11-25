@@ -6,7 +6,7 @@ LamedDB is a cloud-native database that adapts how it stores, serves, and stream
 
 The pilot is a TypeScript SDK and HTTP API for single-region workflows such as orders, tickets, and activity.
 
-This slice stores data in memory behind a `Store` interface. A durable engine can replace that adapter later. Every request needs an API key. The server binds to `127.0.0.1` unless `HOST` is set, and it refuses to start when `LAMEDDB_API_KEYS` is missing.
+The default store is in memory behind a `Store` interface. Set `LAMEDDB_DATABASE_URL` to use PostgreSQL instead. Every request needs an API key. The server binds to `127.0.0.1` unless `HOST` is set, and it refuses to start when `LAMEDDB_API_KEYS` is missing.
 
 ## Requirements
 
@@ -24,6 +24,8 @@ npm install
 npm test
 ```
 
+PostgreSQL store tests run only when `LAMEDDB_TEST_DATABASE_URL` is set. Otherwise they are skipped.
+
 ## Run
 
 ```bash
@@ -37,6 +39,17 @@ Set `LAMEDDB_API_KEYS` to one or more comma-separated API keys before starting t
 `GET /health` is the one route that needs no key. It returns `200` with `{"status":"ok"}` and nothing else, so load balancers and uptime checks can call it. `/health` rejects `If-Match`, `If-None-Match`, `Idempotency-Key`, a query parameter and a request body with `400`. Any other method on `/health` needs a key and returns `405`.
 
 `npm run build` writes `dist/`. `npm start` runs the compiled server and requires the same `LAMEDDB_API_KEYS`.
+
+## PostgreSQL
+
+Leave `LAMEDDB_DATABASE_URL` unset to keep the in-memory store. Set it to a PostgreSQL connection URL to keep collections and records after a restart. The server runs an idempotent migration on startup. The URL is never logged and is never included in an error.
+
+```bash
+docker run --rm --name lameddb-postgres -e POSTGRES_PASSWORD=lamed -e POSTGRES_USER=lamed -e POSTGRES_DB=lamed -p 5432:5432 postgres:16
+LAMEDDB_API_KEYS=dev-key LAMEDDB_DATABASE_URL=postgres://lamed:lamed@127.0.0.1:5432/lamed npm run dev
+```
+
+`IDEMPOTENCY_TTL_MS` and `IDEMPOTENCY_MAX_KEYS` apply to this store as well. A wrong or unreachable URL stops the process before it listens, with a message that does not contain the URL.
 
 ## API
 
@@ -196,4 +209,4 @@ MCP client config:
 
 ## Not in this slice
 
-Idempotency for collection creation, event emit, per-key permissions, key rotation, tenancy, indexes and richer queries (`OR`/`NOT`, sorting by strings or several fields, counts), and a durable store are follow-ups. Listing scans the collection on every page. `If-Match` on create, get, and delete is rejected. `Idempotency-Key` on create, get, and delete is rejected. `If-None-Match` on get and delete is rejected. A query parameter is rejected on every method, except `limit`, `cursor`, `sort`, and `filter[...]` on `GET /v1/collections/{name}/records`. A request body on get or delete is rejected. Those inputs are not silently ignored.
+Idempotency for collection creation, event emit, per-key permissions, key rotation, tenancy, indexes, and richer queries (`OR`/`NOT`, sorting by strings or several fields, counts) are follow-ups. Listing scans the collection on every page. `If-Match` on create, get, and delete is rejected. `Idempotency-Key` on create, get, and delete is rejected. `If-None-Match` on get and delete is rejected. A query parameter is rejected on every method, except `limit`, `cursor`, `sort`, and `filter[...]` on `GET /v1/collections/{name}/records`. A request body on get or delete is rejected. Those inputs are not silently ignored.

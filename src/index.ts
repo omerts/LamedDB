@@ -8,6 +8,7 @@ export {
   ENGINE_SNAPSHOTS,
   EngineRegistry,
   memoryStoreDescriptor,
+  postgresStoreDescriptor,
 } from "./engine/registry.js";
 export type {
   EngineStore,
@@ -36,6 +37,8 @@ export { CollectionClient, LamedDB } from "./sdk/client.js";
 export type { LamedDBOptions } from "./sdk/client.js";
 export { MemoryStore } from "./storage/memory-store.js";
 export type { MemoryStoreOptions } from "./storage/memory-store.js";
+export { PostgresStore } from "./storage/postgres-store.js";
+export type { PostgresStoreOptions, StoredChange } from "./storage/postgres-store.js";
 export type { Store } from "./storage/store.js";
 export type {
   CollectionInfo,
