@@ -21,6 +21,20 @@ jobs:
       fail-fast: false
       matrix:
         node-version: [22, 24]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lamed
+          POSTGRES_PASSWORD: lamed
+          POSTGRES_DB: lamed
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lamed -d lamed"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +74,7 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ""
+          LAMEDDB_TEST_DATABASE_URL: postgres://lamed:lamed@127.0.0.1:5432/lamed
         run: npm test
 
       - name: Require check outcomes

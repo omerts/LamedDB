@@ -175,6 +175,24 @@ export function memoryStoreDescriptor(): EngineDescriptor {
   };
 }
 
+/**
+ * Honest descriptor for a `PostgresStore`.
+ * Same operations and exact ordering as the in-memory store, and it keeps data after the process exits.
+ * The router still selects it through `resolveWriter`. The store does not read ownership itself.
+ */
+export function postgresStoreDescriptor(): EngineDescriptor {
+  return {
+    kind: "postgres",
+    roles: ["write-authority"],
+    operations: [...ENGINE_OPERATIONS],
+    fieldTypes: [...FIELD_TYPES],
+    exactness: "exact",
+    ordering: true,
+    snapshot: "per-call",
+    recovery: "durable",
+  };
+}
+
 /** Engine ids follow the same shape as collection names. */
 export function parseEngineId(id: unknown): string {
   if (typeof id !== "string") {

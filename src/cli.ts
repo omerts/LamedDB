@@ -1,22 +1,97 @@
-import { listen } from "./http/server.js";
+import { Catalog } from "./engine/catalog.js";
+import { EngineRegistry, postgresStoreDescriptor } from "./engine/registry.js";
+import { Router } from "./engine/router.js";
+import { CollectionService } from "./collections/service.js";
+import { listen, type ListenOptions } from "./http/server.js";
 import { MemoryStore } from "./storage/memory-store.js";
-import { apiKeysFromEnv, idempotencyRetentionFromEnv } from "./validate.js";
+import { PostgresStore } from "./storage/postgres-store.js";
+import { apiKeysFromEnv, databaseUrlFromEnv, idempotencyRetentionFromEnv } from "./validate.js";
 
 const port = readPort(process.env.PORT);
 const host = process.env.HOST ?? "127.0.0.1";
 const retention = idempotencyRetentionFromEnv(process.env);
 const apiKeys = apiKeysFromEnv(process.env);
+const databaseUrl = databaseUrlFromEnv(process.env);
+const backend = await openBackend(databaseUrl, retention);
 
-const running = await listen({ port, host, store: new MemoryStore(retention), apiKeys });
+const listenOptions: ListenOptions = { port, host, apiKeys };
 
-console.log(`LamedDB listening on ${running.url}`);
+if (backend.kind === "postgres") {
+  listenOptions.service = backend.service;
+} else {
+  listenOptions.store = backend.store;
+}
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => {
-    void running.close().then(() => {
-      process.exit(0);
+try {
+  const running = await listen(listenOptions);
+
+  console.log(`LamedDB listening on ${running.url}`);
+
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      void running
+        .close()
+        .then(() => backend.close())
+        .then(() => {
+          process.exit(0);
+        });
     });
-  });
+  }
+} catch (error) {
+  await backend.close();
+
+  throw error;
+}
+
+type OpenBackend =
+  | { kind: "memory"; store: MemoryStore; close(): Promise<void> }
+  | { kind: "postgres"; service: CollectionService; close(): Promise<void> };
+
+async function openBackend(
+  databaseUrl: string | undefined,
+  retention: { idempotencyTtlMs: number; maxIdempotencyKeys: number },
+): Promise<OpenBackend> {
+  if (databaseUrl === undefined) {
+    return {
+      kind: "memory",
+      store: new MemoryStore(retention),
+      close: async () => {},
+    };
+  }
+
+  let store: PostgresStore | undefined;
+
+  try {
+    store = new PostgresStore({
+      connectionString: databaseUrl,
+      idempotencyTtlMs: retention.idempotencyTtlMs,
+      maxIdempotencyKeys: retention.maxIdempotencyKeys,
+    });
+    await store.migrate();
+  } catch {
+    if (store !== undefined) {
+      try {
+        await store.close();
+      } catch {
+        // The startup message below is the one the operator sees.
+      }
+    }
+
+    console.error(
+      "Could not open the database. Check LAMEDDB_DATABASE_URL and that PostgreSQL is accepting connections.",
+    );
+    process.exit(1);
+  }
+
+  const registry = new EngineRegistry();
+
+  registry.register("postgres", store, postgresStoreDescriptor());
+
+  return {
+    kind: "postgres",
+    service: new CollectionService(new Router(registry, new Catalog(registry, "postgres"))),
+    close: () => store.close(),
+  };
 }
 
 function readPort(value: string | undefined): number {
