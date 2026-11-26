@@ -7,7 +7,7 @@ import type {
   JsonObject,
   RecordEnvelope,
 } from "../types.js";
-import { parseMemoryStoreOptions } from "../validate.js";
+import { assertNoEmbeddedNul, parseMemoryStoreOptions } from "../validate.js";
 import type {
   CollectionState,
   IdempotentPut,
@@ -172,6 +172,8 @@ export class MemoryStore implements Store {
         `Collection "${input.collection}" was replaced before the write.`,
       );
     }
+
+    assertNoEmbeddedNul(input.data);
 
     // One clock reading covers the expiry decision and the timestamp stored
     // after a successful write. Nothing between them awaits.
@@ -429,7 +431,18 @@ function cloneFields(fields: FieldMap): FieldMap {
 }
 
 function cloneAliases(aliases: AliasMap): AliasMap {
-  return { ...aliases };
+  const copy: Record<string, string> = {};
+
+  for (const [name, target] of Object.entries(aliases)) {
+    Object.defineProperty(copy, name, {
+      value: target,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  return copy;
 }
 
 /** The payload callers see. `aliases` appears only when the collection declared some. */

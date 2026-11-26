@@ -3,7 +3,7 @@ import type { PoolClient, QueryResultRow } from "pg";
 
 import { LamedError } from "../errors.js";
 import type { AliasMap, CollectionInfo, FieldMap, FieldType, JsonObject, RecordEnvelope } from "../types.js";
-import { parsePostgresStoreOptions } from "../validate.js";
+import { assertNoEmbeddedNul, parsePostgresStoreOptions } from "../validate.js";
 import { compareRecords, isAfter, matchesFilters } from "./query.js";
 import type {
   CollectionState,
@@ -55,6 +55,8 @@ interface LiveKey {
 export class PostgresStore implements Store {
   private readonly connectionString: string;
 
+  private readonly schemaName: string;
+
   private readonly schemaSql: string;
 
   private readonly collections: string;
@@ -64,6 +66,8 @@ export class PostgresStore implements Store {
   private readonly versions: string;
 
   private readonly idempotency: string;
+
+  private readonly idempotencyOrderIndex: string;
 
   private readonly changes: string;
 
@@ -85,11 +89,14 @@ export class PostgresStore implements Store {
     const parsed = parsePostgresStoreOptions(options);
 
     this.connectionString = parsed.connectionString;
+    this.schemaName = parsed.schema;
     this.schemaSql = escapeIdentifier(parsed.schema);
     this.collections = `${this.schemaSql}.collections`;
     this.records = `${this.schemaSql}.records`;
     this.versions = `${this.schemaSql}.versions`;
     this.idempotency = `${this.schemaSql}.idempotency`;
+    // Index names cannot be schema-qualified. PostgreSQL creates the index in the table's schema.
+    this.idempotencyOrderIndex = escapeIdentifier("idempotency_stored_at_seq");
     this.changes = `${this.schemaSql}.changes`;
     this.meta = `${this.schemaSql}.meta`;
     this.sequenceRegclass = `${this.schemaSql}.idempotency_seq`;
@@ -172,6 +179,72 @@ export class PostgresStore implements Store {
         `INSERT INTO ${this.meta} (id, next_revision) VALUES (1, 1) ON CONFLICT (id) DO NOTHING`,
       );
     });
+
+    await this.ensureIdempotencyOrderIndex();
+  }
+
+  /**
+   * Build the retention index outside the startup transaction.
+   * `CREATE INDEX CONCURRENTLY` does not block writes on an existing table.
+   * A failed build leaves an invalid index; the next migrate drops it and tries again.
+   */
+  private async ensureIdempotencyOrderIndex(): Promise<void> {
+    if ((await this.idempotencyOrderIndexState()) === "valid") {
+      return;
+    }
+
+    await this.queryAutocommit(
+      `DROP INDEX CONCURRENTLY IF EXISTS ${this.schemaSql}.${this.idempotencyOrderIndex}`,
+    );
+
+    try {
+      await this.queryAutocommit(
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${this.idempotencyOrderIndex}
+         ON ${this.idempotency} (collection, stored_at, seq)`,
+      );
+    } catch (error) {
+      if ((await this.idempotencyOrderIndexState()) === "valid") {
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async idempotencyOrderIndexState(): Promise<"valid" | "invalid" | "missing"> {
+    let rows: { valid: boolean }[];
+
+    try {
+      const result = await this.pool.query<{ valid: boolean }>(
+        `SELECT index_entry.indisvalid AS valid
+         FROM pg_class AS index_rel
+         JOIN pg_namespace AS namespace ON namespace.oid = index_rel.relnamespace
+         JOIN pg_index AS index_entry ON index_entry.indexrelid = index_rel.oid
+         WHERE namespace.nspname = $1
+           AND index_rel.relname = $2`,
+        [this.schemaName, "idempotency_stored_at_seq"],
+      );
+
+      rows = result.rows;
+    } catch (error) {
+      throw redact(error, this.connectionString);
+    }
+
+    const row = rows[0];
+
+    if (row === undefined) {
+      return "missing";
+    }
+
+    return row.valid === true ? "valid" : "invalid";
+  }
+
+  private async queryAutocommit(text: string): Promise<void> {
+    try {
+      await this.pool.query(text);
+    } catch (error) {
+      throw redact(error, this.connectionString);
+    }
   }
 
   /** Close the pool this store opened. A shared pool is left running. */
@@ -255,6 +328,8 @@ export class PostgresStore implements Store {
       if (collection.revision !== input.collectionRevision) {
         throw new LamedError("not_found", `Collection "${input.collection}" was replaced before the write.`);
       }
+
+      assertNoEmbeddedNul(data);
 
       const clock = this.readNow();
       const idempotency = input.idempotency;
@@ -669,28 +744,38 @@ export class PostgresStore implements Store {
 
   /**
    * Expired keys are a prefix of (stored_at, seq). Delete that prefix and stop before the first live key.
-   * A backwards clock pins stored_at so a newer key cannot expire while an older one is still live.
+   * A key is live when stored_at > now - ttl. A backwards clock pins stored_at, so a newer key cannot
+   * expire while an older one is still live. Both statements use the (collection, stored_at, seq) index.
    */
   private async deleteExpiredPrefix(client: PoolClient, collection: string, now: number): Promise<void> {
-    await client.query(
-      `DELETE FROM ${this.idempotency} AS target
-       WHERE target.collection = $1
-         AND target.stored_at <= $2::bigint
-         AND $2::bigint - target.stored_at >= $3::bigint
-         AND NOT EXISTS (
-           SELECT 1
-           FROM ${this.idempotency} AS earlier
-           WHERE earlier.collection = target.collection
-             AND (
-               earlier.stored_at < target.stored_at
-               OR (earlier.stored_at = target.stored_at AND earlier.seq < target.seq)
-             )
-             AND NOT (
-               earlier.stored_at <= $2::bigint
-               AND $2::bigint - earlier.stored_at >= $3::bigint
-             )
-         )`,
+    const boundary = await this.rows<{ stored_at: string; seq: string }>(
+      client,
+      `SELECT stored_at::text AS stored_at, seq::text AS seq
+       FROM ${this.idempotency}
+       WHERE collection = $1
+         AND stored_at > $2::bigint - $3::bigint
+       ORDER BY stored_at ASC, seq ASC
+       LIMIT 1`,
       [collection, now, this.idempotencyTtlMs],
+    );
+    const firstLive = boundary[0];
+
+    if (firstLive === undefined) {
+      await client.query(
+        `DELETE FROM ${this.idempotency}
+         WHERE collection = $1
+           AND stored_at <= $2::bigint - $3::bigint`,
+        [collection, now, this.idempotencyTtlMs],
+      );
+
+      return;
+    }
+
+    await client.query(
+      `DELETE FROM ${this.idempotency}
+       WHERE collection = $1
+         AND (stored_at, seq) < ($2::bigint, $3::bigint)`,
+      [collection, firstLive.stored_at, firstLive.seq],
     );
   }
 
@@ -709,28 +794,21 @@ export class PostgresStore implements Store {
     return readInteger(newest, "stored_at");
   }
 
+  /** Drop keys older than the newest `maxIdempotencyKeys`, using the stored-time index. */
   private async dropOverCap(client: PoolClient, collection: string): Promise<void> {
-    const rows = await this.rows<{ n: number | string }>(
-      client,
-      `SELECT count(*)::int AS n FROM ${this.idempotency} WHERE collection = $1`,
-      [collection],
-    );
-    const overflow = readInteger(rows[0]?.n ?? 0, "count") - this.maxIdempotencyKeys;
-
-    if (overflow <= 0) {
-      return;
-    }
-
     await client.query(
-      `DELETE FROM ${this.idempotency}
-       WHERE ctid IN (
-         SELECT ctid
+      `DELETE FROM ${this.idempotency} AS target
+       USING (
+         SELECT stored_at, seq
          FROM ${this.idempotency}
          WHERE collection = $1
-         ORDER BY stored_at ASC, seq ASC
-         LIMIT $2
-       )`,
-      [collection, overflow],
+         ORDER BY stored_at DESC, seq DESC
+         OFFSET $2
+       ) AS overflow
+       WHERE target.collection = $1
+         AND target.stored_at = overflow.stored_at
+         AND target.seq = overflow.seq`,
+      [collection, this.maxIdempotencyKeys],
     );
   }
 
@@ -872,14 +950,20 @@ function cloneFields(fields: FieldMap): FieldMap {
   const copy: Record<string, FieldType> = {};
 
   for (const [name, type] of Object.entries(fields)) {
-    copy[name] = type;
+    defineOwn(copy, name, type);
   }
 
   return copy;
 }
 
 function cloneAliases(aliases: AliasMap): AliasMap {
-  return { ...aliases };
+  const copy: Record<string, string> = {};
+
+  for (const [name, target] of Object.entries(aliases)) {
+    defineOwn(copy, name, target);
+  }
+
+  return copy;
 }
 
 function collectionInfo(name: string, fields: FieldMap, aliases: AliasMap): CollectionInfo {
@@ -927,7 +1011,7 @@ function readFields(value: unknown): FieldMap {
       throw new LamedError("internal", "Stored collection fields are unreadable.");
     }
 
-    fields[name] = type;
+    defineOwn(fields, name, type);
   }
 
   return fields;
@@ -947,10 +1031,19 @@ function readAliases(value: unknown): AliasMap {
       throw new LamedError("internal", "Stored collection aliases are unreadable.");
     }
 
-    aliases[name] = target;
+    defineOwn(aliases, name, target);
   }
 
   return aliases;
+}
+
+function defineOwn(target: object, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
 }
 
 function readJsonObject(value: unknown): JsonObject {

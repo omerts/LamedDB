@@ -129,7 +129,12 @@ function aliasMapFromPayload(value: Record<string, unknown>): AliasMap {
       throw new LamedError("internal", "Server returned an unexpected collection payload.");
     }
 
-    aliases[name] = target;
+    Object.defineProperty(aliases, name, {
+      value: target,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
 
   return aliases;

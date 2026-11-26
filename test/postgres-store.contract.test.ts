@@ -169,6 +169,61 @@ if (testDatabaseUrl === undefined) {
   });
 
   describe("PostgresStore durability and change log", () => {
+    it("creates an idempotent index for idempotency retention order", async () => {
+      const schema = `i_${randomBytes(8).toString("hex")}`;
+
+      schemas.push(schema);
+
+      const store = new PostgresStore(contractStoreOptions(databaseUrl, schema, pool, undefined));
+
+      try {
+        await store.migrate();
+        await store.migrate();
+
+        const indexes = await pool.query<{ indexdef: string }>(
+          `SELECT indexdef
+           FROM pg_indexes
+           WHERE schemaname = $1
+             AND tablename = 'idempotency'
+             AND indexname = 'idempotency_stored_at_seq'`,
+          [schema],
+        );
+
+        expect(indexes.rows).toHaveLength(1);
+        expect(indexes.rows[0]?.indexdef).toContain("(collection, stored_at, seq)");
+
+        await pool.query(
+          `UPDATE pg_index
+           SET indisvalid = false
+           WHERE indexrelid = (
+             SELECT index_rel.oid
+             FROM pg_class AS index_rel
+             JOIN pg_namespace AS namespace ON namespace.oid = index_rel.relnamespace
+             WHERE namespace.nspname = $1
+               AND index_rel.relname = 'idempotency_stored_at_seq'
+           )`,
+          [schema],
+        );
+        await store.migrate();
+
+        const rebuilt = await pool.query<{ valid: boolean; indexdef: string }>(
+          `SELECT index_entry.indisvalid AS valid, pg_get_indexdef(index_entry.indexrelid) AS indexdef
+           FROM pg_class AS index_rel
+           JOIN pg_namespace AS namespace ON namespace.oid = index_rel.relnamespace
+           JOIN pg_index AS index_entry ON index_entry.indexrelid = index_rel.oid
+           WHERE namespace.nspname = $1
+             AND index_rel.relname = 'idempotency_stored_at_seq'`,
+          [schema],
+        );
+
+        expect(rebuilt.rows).toHaveLength(1);
+        expect(rebuilt.rows[0]?.valid).toBe(true);
+        expect(rebuilt.rows[0]?.indexdef).toContain("(collection, stored_at, seq)");
+      } finally {
+        await store.close();
+      }
+    });
+
     it("keeps records after the store is closed and migrate runs twice", async () => {
       const schema = `d_${randomBytes(8).toString("hex")}`;
 
