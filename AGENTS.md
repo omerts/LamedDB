@@ -85,4 +85,5 @@ Apply this to every task. Use Qodo Reviewer on uncommitted changes (staged and u
 - Do not change code for Low findings. Report every Low finding for the owner's attention, including unchanged Low Rule violations.
 - After fixes, run typecheck, tests and build, then rerun the review. Repeat until no valid High or Medium finding remains. Stop after 3 rounds.
 - For a PR, the latest completed Qodo review must cover the latest commit.
+- Before any merge, run the pre-merge Qodo findings check (`npm run check:qodo-findings -- --pr-url <pull request url>`, or the same check on JSON from `qodo read pr-review-session findings --pr-url <url> --extended --json` via `--file` or stdin). Do not merge while any High or Medium finding is open. Each one must be fixed or rejected with verified evidence on the pull request. The check does not dismiss findings, lower severities, or replace the other readiness gates or a human merge approval.
 - Report the task as NOT DONE, with the blocker and what is needed, if a valid High or Medium finding is unresolved, checks or review are incomplete, or the loop stalls.

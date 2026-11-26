@@ -20,6 +20,7 @@
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run && node --test scripts/readiness.test.mjs",
+    "check:qodo-findings": "tsx scripts/check-qodo-findings.ts",
     "mcp": "tsx src/mcp/main.ts",
     "start:mcp": "node dist/mcp/main.js"
   },
