@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createReadStream } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -10,7 +12,9 @@ import { describe, expect, it } from "vitest";
 import {
   checkFindings,
   evaluateFindings,
+  InputTooLargeError,
   parseFindingsJson,
+  readStreamAtMost,
   qodoFindingsArgs,
   redactSecrets,
   runProcess,
@@ -416,6 +420,48 @@ describe("qodo process", () => {
   });
 });
 
+describe("bounded input", () => {
+  it("stops reading a stream once the byte cap is exceeded", async () => {
+    let produced = 0;
+    const stream = Readable.from((async function* () {
+      for (let index = 0; index < 20; index += 1) {
+        produced += 1;
+        yield Buffer.alloc(50, 97);
+      }
+    })());
+
+    await expect(readStreamAtMost(stream, 120)).rejects.toBeInstanceOf(InputTooLargeError);
+    expect(produced).toBeLessThan(20);
+  });
+
+  it("does not read the rest of an oversized findings file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "qodo-findings-size-"));
+    const file = join(dir, "findings.json");
+
+    try {
+      await writeFile(file, Buffer.alloc(2 * 1024 * 1024, 97));
+      const stream = createReadStream(file, { highWaterMark: 16 * 1024 });
+
+      await expect(readStreamAtMost(stream, 32 * 1024)).rejects.toBeInstanceOf(InputTooLargeError);
+      expect(stream.bytesRead).toBeGreaterThan(0);
+      expect(stream.bytesRead).toBeLessThan(512 * 1024);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits 2 when a reader stops at the size limit", async () => {
+    const captured = io({
+      readFile: async () => {
+        throw new InputTooLargeError();
+      },
+    });
+
+    expect(await checkFindings(["--file", "huge.json"], captured.io)).toBe(2);
+    expect(captured.stderr()).toContain("Findings JSON exceeds the size limit.");
+  });
+});
+
 describe("command entry", () => {
   it("runs the check script on a findings file", async () => {
     const dir = await mkdtemp(join(tmpdir(), "qodo-findings-"));
@@ -444,6 +490,42 @@ describe("command entry", () => {
       expect(errors, output).toBe("");
       expect(output).toContain("No open High or Medium findings");
       expect(code).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("emits every blocking finding when stderr is a pipe", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "qodo-findings-report-"));
+    const file = join(dir, "findings.json");
+    const findings = Array.from({ length: 800 }, (_, index) => ({
+      id: `finding-${String(index).padStart(4, "0")}`,
+      severity: "High",
+      status: "pending",
+      category: "Bug",
+      title: "x".repeat(180),
+      file: "scripts/check-qodo-findings.ts",
+    }));
+
+    try {
+      await writeFile(file, JSON.stringify({ findings }));
+      const child = spawn(process.execPath, ["node_modules/tsx/dist/cli.mjs", "scripts/check-qodo-findings.ts", "--file", file], {
+        cwd: ROOT,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const stderr: Buffer[] = [];
+
+      child.stderr?.on("data", (chunk: Buffer) => {
+        stderr.push(chunk);
+      });
+
+      const [code] = (await once(child, "exit")) as [number | null];
+      const errors = Buffer.concat(stderr).toString("utf8");
+
+      expect(code).toBe(1);
+      expect(errors).toContain("800 open High or Medium findings");
+      expect(errors).toContain("finding-0000");
+      expect(errors).toContain("finding-0799");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

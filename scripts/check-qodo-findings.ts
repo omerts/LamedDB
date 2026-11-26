@@ -4,11 +4,12 @@
 // Exits 1 when a High or Medium finding is still open, 0 when none are, and 2 when
 // the input or the qodo command cannot be evaluated. Does not change finding state.
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
+import type { Readable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
 const MAX_FINDINGS_JSON_BYTES = 20 * 1024 * 1024;
+const READ_CHUNK_BYTES = 64 * 1024;
 const QODO_TIMEOUT_MS = 120_000;
 const SECRET_ENV = ["QODO_API_KEY", "QODO_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN"] as const;
 
@@ -356,6 +357,57 @@ function parseFinding(
       status: status.display,
     },
   };
+}
+
+export class InputTooLargeError extends Error {
+  constructor() {
+    super("Findings JSON exceeds the size limit.");
+    this.name = "InputTooLargeError";
+  }
+}
+
+export function readStreamAtMost(stream: Readable, maxBytes: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    let settled = false;
+
+    const finish = (error?: unknown) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+
+      if (error !== undefined) {
+        stream.destroy();
+        reject(error);
+
+        return;
+      }
+
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    };
+
+    stream.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+
+      if (bytes + buffer.length > maxBytes) {
+        finish(new InputTooLargeError());
+
+        return;
+      }
+
+      bytes += buffer.length;
+      chunks.push(buffer);
+    });
+    stream.on("error", (error: Error) => {
+      finish(error);
+    });
+    stream.on("end", () => {
+      finish();
+    });
+  });
 }
 
 export function parseFindingsJson(
@@ -826,16 +878,28 @@ export async function checkFindings(argv: readonly string[], io: CheckIo): Promi
 
   let text: string;
 
-  if (parsed.mode === "file") {
-    try {
+  try {
+    if (parsed.mode === "file") {
       text = await io.readFile(parsed.file);
-    } catch (error) {
+    } else {
+      text = await io.readStdin();
+    }
+  } catch (error) {
+    if (error instanceof InputTooLargeError) {
+      write(io.stderr, "Qodo findings check failed. Findings JSON exceeds the size limit.");
+
+      return 2;
+    }
+
+    if (parsed.mode === "file") {
       write(io.stderr, `Qodo findings check failed. Cannot read findings file ${quoted(parsed.file)} (${readErrorCode(error)}).`);
 
       return 2;
     }
-  } else {
-    text = await io.readStdin();
+
+    write(io.stderr, "Qodo findings check failed. Cannot read findings JSON from stdin.");
+
+    return 2;
   }
 
   const json = parseFindingsJson(text);
@@ -870,16 +934,10 @@ function isDirectRun(): boolean {
 function createDefaultIo(): CheckIo {
   return {
     readFile(file) {
-      return readFile(file, "utf8");
+      return readStreamAtMost(createReadStream(file, { highWaterMark: READ_CHUNK_BYTES }), MAX_FINDINGS_JSON_BYTES);
     },
-    async readStdin() {
-      const chunks: Buffer[] = [];
-
-      for await (const chunk of process.stdin) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string));
-      }
-
-      return Buffer.concat(chunks).toString("utf8");
+    readStdin() {
+      return readStreamAtMost(process.stdin, MAX_FINDINGS_JSON_BYTES);
     },
     runQodo: runQodoFindings,
     stdinIsTTY: process.stdin.isTTY === true,
@@ -893,7 +951,12 @@ function createDefaultIo(): CheckIo {
 }
 
 if (isDirectRun()) {
-  const code = await checkFindings(process.argv.slice(2), createDefaultIo());
+  try {
+    process.exitCode = await checkFindings(process.argv.slice(2), createDefaultIo());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unexpected failure";
 
-  process.exit(code);
+    process.stderr.write(`Qodo findings check failed. ${redactSecrets(message, envSecrets())}\n`);
+    process.exitCode = 2;
+  }
 }
