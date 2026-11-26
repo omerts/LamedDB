@@ -156,8 +156,6 @@ export class MemoryStore implements Store {
    * record update would let two puts with the same key both write.
    */
   private applyPut(input: PutRecordInput): PutRecordResult {
-    assertNoEmbeddedNul(input.data);
-
     const collection = this.collections.get(input.collection);
 
     if (!collection) {
@@ -174,6 +172,8 @@ export class MemoryStore implements Store {
         `Collection "${input.collection}" was replaced before the write.`,
       );
     }
+
+    assertNoEmbeddedNul(input.data);
 
     // One clock reading covers the expiry decision and the timestamp stored
     // after a successful write. Nothing between them awaits.

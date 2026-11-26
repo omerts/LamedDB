@@ -281,6 +281,20 @@ export function runStoreContract(
         expect(await store.getCollection("orders")).toBeNull();
       });
 
+      it("reports a missing collection before a NUL in the document", async () => {
+        await expect(
+          store.putRecord({
+            collection: "orders",
+            id: "a",
+            data: { status: "a\u0000b" },
+            createOnly: false,
+            collectionRevision: 1,
+          }),
+        ).rejects.toMatchObject(rejection("not_found"));
+        expect(await store.getCollection("orders")).toBeNull();
+        expect(await store.getRecord("orders", "a")).toBeNull();
+      });
+
       it("rejects a document checked against a collection that has since been replaced", async () => {
         const first = await collection(store, "orders", { status: "string" });
 

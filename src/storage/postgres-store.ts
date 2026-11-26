@@ -55,6 +55,8 @@ interface LiveKey {
 export class PostgresStore implements Store {
   private readonly connectionString: string;
 
+  private readonly schemaName: string;
+
   private readonly schemaSql: string;
 
   private readonly collections: string;
@@ -87,6 +89,7 @@ export class PostgresStore implements Store {
     const parsed = parsePostgresStoreOptions(options);
 
     this.connectionString = parsed.connectionString;
+    this.schemaName = parsed.schema;
     this.schemaSql = escapeIdentifier(parsed.schema);
     this.collections = `${this.schemaSql}.collections`;
     this.records = `${this.schemaSql}.records`;
@@ -156,10 +159,6 @@ export class PostgresStore implements Store {
         )`,
       );
       await client.query(
-        `CREATE INDEX IF NOT EXISTS ${this.idempotencyOrderIndex}
-         ON ${this.idempotency} (collection, stored_at, seq)`,
-      );
-      await client.query(
         `CREATE TABLE IF NOT EXISTS ${this.changes} (
           collection text NOT NULL REFERENCES ${this.collections} (name) ON DELETE CASCADE,
           log_position bigint NOT NULL,
@@ -180,6 +179,72 @@ export class PostgresStore implements Store {
         `INSERT INTO ${this.meta} (id, next_revision) VALUES (1, 1) ON CONFLICT (id) DO NOTHING`,
       );
     });
+
+    await this.ensureIdempotencyOrderIndex();
+  }
+
+  /**
+   * Build the retention index outside the startup transaction.
+   * `CREATE INDEX CONCURRENTLY` does not block writes on an existing table.
+   * A failed build leaves an invalid index; the next migrate drops it and tries again.
+   */
+  private async ensureIdempotencyOrderIndex(): Promise<void> {
+    if ((await this.idempotencyOrderIndexState()) === "valid") {
+      return;
+    }
+
+    await this.queryAutocommit(
+      `DROP INDEX CONCURRENTLY IF EXISTS ${this.schemaSql}.${this.idempotencyOrderIndex}`,
+    );
+
+    try {
+      await this.queryAutocommit(
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${this.idempotencyOrderIndex}
+         ON ${this.idempotency} (collection, stored_at, seq)`,
+      );
+    } catch (error) {
+      if ((await this.idempotencyOrderIndexState()) === "valid") {
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async idempotencyOrderIndexState(): Promise<"valid" | "invalid" | "missing"> {
+    let rows: { valid: boolean }[];
+
+    try {
+      const result = await this.pool.query<{ valid: boolean }>(
+        `SELECT index_entry.indisvalid AS valid
+         FROM pg_class AS index_rel
+         JOIN pg_namespace AS namespace ON namespace.oid = index_rel.relnamespace
+         JOIN pg_index AS index_entry ON index_entry.indexrelid = index_rel.oid
+         WHERE namespace.nspname = $1
+           AND index_rel.relname = $2`,
+        [this.schemaName, "idempotency_stored_at_seq"],
+      );
+
+      rows = result.rows;
+    } catch (error) {
+      throw redact(error, this.connectionString);
+    }
+
+    const row = rows[0];
+
+    if (row === undefined) {
+      return "missing";
+    }
+
+    return row.valid === true ? "valid" : "invalid";
+  }
+
+  private async queryAutocommit(text: string): Promise<void> {
+    try {
+      await this.pool.query(text);
+    } catch (error) {
+      throw redact(error, this.connectionString);
+    }
   }
 
   /** Close the pool this store opened. A shared pool is left running. */
@@ -253,8 +318,6 @@ export class PostgresStore implements Store {
   async putRecord(input: PutRecordInput): Promise<PutRecordResult> {
     const data = cloneDocument(input.data);
 
-    assertNoEmbeddedNul(data);
-
     return this.withTransaction(async (client) => {
       const collection = await this.lockCollection(client, input.collection);
 
@@ -265,6 +328,8 @@ export class PostgresStore implements Store {
       if (collection.revision !== input.collectionRevision) {
         throw new LamedError("not_found", `Collection "${input.collection}" was replaced before the write.`);
       }
+
+      assertNoEmbeddedNul(data);
 
       const clock = this.readNow();
       const idempotency = input.idempotency;
@@ -709,10 +774,7 @@ export class PostgresStore implements Store {
     await client.query(
       `DELETE FROM ${this.idempotency}
        WHERE collection = $1
-         AND (
-           stored_at < $2::bigint
-           OR (stored_at = $2::bigint AND seq < $3::bigint)
-         )`,
+         AND (stored_at, seq) < ($2::bigint, $3::bigint)`,
       [collection, firstLive.stored_at, firstLive.seq],
     );
   }

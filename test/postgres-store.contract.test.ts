@@ -191,6 +191,34 @@ if (testDatabaseUrl === undefined) {
 
         expect(indexes.rows).toHaveLength(1);
         expect(indexes.rows[0]?.indexdef).toContain("(collection, stored_at, seq)");
+
+        await pool.query(
+          `UPDATE pg_index
+           SET indisvalid = false
+           WHERE indexrelid = (
+             SELECT index_rel.oid
+             FROM pg_class AS index_rel
+             JOIN pg_namespace AS namespace ON namespace.oid = index_rel.relnamespace
+             WHERE namespace.nspname = $1
+               AND index_rel.relname = 'idempotency_stored_at_seq'
+           )`,
+          [schema],
+        );
+        await store.migrate();
+
+        const rebuilt = await pool.query<{ valid: boolean; indexdef: string }>(
+          `SELECT index_entry.indisvalid AS valid, pg_get_indexdef(index_entry.indexrelid) AS indexdef
+           FROM pg_class AS index_rel
+           JOIN pg_namespace AS namespace ON namespace.oid = index_rel.relnamespace
+           JOIN pg_index AS index_entry ON index_entry.indexrelid = index_rel.oid
+           WHERE namespace.nspname = $1
+             AND index_rel.relname = 'idempotency_stored_at_seq'`,
+          [schema],
+        );
+
+        expect(rebuilt.rows).toHaveLength(1);
+        expect(rebuilt.rows[0]?.valid).toBe(true);
+        expect(rebuilt.rows[0]?.indexdef).toContain("(collection, stored_at, seq)");
       } finally {
         await store.close();
       }
