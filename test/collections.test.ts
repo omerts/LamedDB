@@ -2,8 +2,8 @@ import { request as httpRequest } from "node:http";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { LamedDB, LamedError, type RunningServer } from "../src/index.js";
-import { LIMITS, parseCollectionName, parseRecordId } from "../src/validate.js";
+import { LamedDB, LamedError, type FieldType, type JsonObject, type JsonValue, type RunningServer } from "../src/index.js";
+import { LIMITS, parseCollectionName, parseRecordId, validateDocument } from "../src/validate.js";
 import { startTestServer, TEST_API_KEY } from "./helpers.js";
 
 const paidAt = "2026-11-19T08:15:00.000Z";
@@ -858,7 +858,136 @@ describe("collections API", () => {
 
     expect(tickets.status).toBe(201);
   });
+
+  it("keeps a __proto__ field type and a __proto__ alias through create, put, and list", async () => {
+    const fields = ownRecord<FieldType>([
+      ["status", "string"],
+      ["__proto__", "integer"],
+    ]);
+    const created = await db.admin.createCollection("orders", { fields });
+
+    expect(Object.getPrototypeOf(created.fields)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(created.fields, "__proto__")?.value).toBe("integer");
+    expect(created.fields["__proto__"]).toBe("integer");
+
+    const orders = db.collection("orders");
+    const wrong = ownRecord<JsonValue>([
+      ["status", "open"],
+      ["__proto__", "nope"],
+    ]);
+
+    await expect(orders.put("ord_1", wrong)).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: 'Field "__proto__" must be an integer in the safe integer range, or null.',
+    });
+    await expect(orders.get("ord_1")).rejects.toMatchObject({ code: "not_found", status: 404 });
+
+    const right = ownRecord<JsonValue>([
+      ["status", "open"],
+      ["__proto__", 4],
+    ]);
+    const written = await orders.put("ord_1", right);
+    const loaded = await orders.get("ord_1");
+
+    expect(Object.getOwnPropertyDescriptor(written.data, "__proto__")?.value).toBe(4);
+    expect(Object.getPrototypeOf(written.data)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(loaded.data, "__proto__")?.value).toBe(4);
+
+    const aliases = ownRecord([["__proto__", "status"]]);
+    const aliased = await db.admin.createCollection("tickets", {
+      fields: { status: "string" },
+      aliases,
+    });
+
+    if (aliased.aliases === undefined) {
+      throw new Error("expected the alias to be returned");
+    }
+
+    expect(Object.getOwnPropertyDescriptor(aliased.aliases, "__proto__")?.value).toBe("status");
+    expect(Object.getPrototypeOf(aliased.aliases)).toBe(Object.prototype);
+
+    const tickets = db.collection("tickets");
+
+    await tickets.put("ord_1", { status: "open" });
+    await tickets.put("ord_2", { status: "paid" });
+
+    const page = await tickets.list({ filter: ownRecord([["__proto__", "open"]]) });
+
+    expect(page.records.map((record) => record.id)).toEqual(["ord_1"]);
+  });
+
+  it("rejects a NUL character in record JSON and does not remember the idempotency key", async () => {
+    await db.admin.createCollection("orders", { fields: { status: "string" } });
+
+    const orders = db.collection("orders");
+    const nested = { status: "open", extra: {} as JsonObject };
+
+    Object.defineProperty(nested.extra, "a\u0000", {
+      value: true,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+
+    const cases: readonly { body: JsonObject; message: string }[] = [
+      { body: { status: "a\u0000b" }, message: "String at $.status must not contain a NUL character." },
+      { body: { status: "open", note: "a\u0000" }, message: "String at $.note must not contain a NUL character." },
+      {
+        body: { status: "open", extra: { note: "a\u0000" } },
+        message: "String at $.extra.note must not contain a NUL character.",
+      },
+      {
+        body: { status: "open", tags: ["ok", "a\u0000"] },
+        message: "String at $.tags[1] must not contain a NUL character.",
+      },
+      {
+        body: ownRecord<JsonValue>([
+          ["status", "open"],
+          ["a\u0000", 1],
+        ]),
+        message: "Object key at $ must not contain a NUL character.",
+      },
+      { body: nested, message: "Object key at $.extra must not contain a NUL character." },
+    ];
+
+    await expect(orders.put("ord_1", cases[0]?.body ?? { status: "a\u0000b" })).rejects.toMatchObject({
+      code: "invalid_argument",
+      status: 400,
+      message: "String at $.status must not contain a NUL character.",
+    });
+
+    for (const entry of cases) {
+      await expect(orders.put("ord_1", entry.body, { idempotencyKey: "ord-1" })).rejects.toMatchObject({
+        code: "invalid_argument",
+        status: 400,
+        message: entry.message,
+      });
+    }
+
+    await expect(orders.get("ord_1")).rejects.toMatchObject({ code: "not_found", status: 404 });
+
+    const written = await orders.put("ord_1", { status: "open\n\u0001" }, { idempotencyKey: "ord-1" });
+
+    expect(written.data.status).toBe("open\n\u0001");
+    await expect(orders.get("ord_1")).resolves.toEqual(written);
+  });
 });
+
+function ownRecord<T>(entries: readonly (readonly [string, T])[]): Record<string, T> {
+  const record: Record<string, T> = {};
+
+  for (const [key, value] of entries) {
+    Object.defineProperty(record, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  return record;
+}
 
 function requestWithBody(
   url: string,
@@ -902,6 +1031,43 @@ function requestWithBody(
     req.end(body);
   });
 }
+
+describe("validateDocument", () => {
+  it("rejects a NUL character in nested strings and keys and keeps other control characters", () => {
+    const fields = { status: "string" as const };
+    const nested = { status: "open", box: {} as Record<string, JsonValue> };
+
+    Object.defineProperty(nested.box, "a\u0000", {
+      value: 1,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+
+    expect(() => validateDocument({ status: "a\u0000b" }, fields)).toThrow(
+      expect.objectContaining({
+        code: "invalid_argument",
+        status: 400,
+        message: "String at $.status must not contain a NUL character.",
+      }),
+    );
+    expect(() => validateDocument({ status: "open", tags: [{ note: "a\u0000" }] }, fields)).toThrow(
+      expect.objectContaining({
+        code: "invalid_argument",
+        status: 400,
+        message: "String at $.tags[0].note must not contain a NUL character.",
+      }),
+    );
+    expect(() => validateDocument(nested, fields)).toThrow(
+      expect.objectContaining({
+        code: "invalid_argument",
+        status: 400,
+        message: "Object key at $.box must not contain a NUL character.",
+      }),
+    );
+    expect(validateDocument({ status: "open\n\u0001" }, fields)).toEqual({ status: "open\n\u0001" });
+  });
+});
 
 describe("parseCollectionName and parseRecordId", () => {
   it("rejects non-string values instead of coercing them into identifiers", () => {

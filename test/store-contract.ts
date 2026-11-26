@@ -10,7 +10,7 @@ import type {
   PutRecordResult,
   Store,
 } from "../src/storage/store.js";
-import type { AliasMap, ErrorCode, FieldMap, JsonObject, RecordEnvelope } from "../src/index.js";
+import type { AliasMap, ErrorCode, FieldMap, FieldType, JsonObject, JsonValue, RecordEnvelope } from "../src/index.js";
 import type { ListPosition, RecordFilter, RecordSort } from "../src/storage/query.js";
 
 /**
@@ -93,6 +93,69 @@ export function runStoreContract(
 
         expect(created.aliases).toBeUndefined();
         expect((await store.getCollection("orders"))?.aliases).toBeUndefined();
+      });
+
+      it("keeps a __proto__ field and a __proto__ alias as own data properties", async () => {
+        const fields = ownRecord<FieldType>([
+          ["status", "string"],
+          ["__proto__", "integer"],
+        ]);
+        const created = await store.createCollection("orders", fields);
+
+        expect(Object.getPrototypeOf(created.fields)).toBe(Object.prototype);
+        expect(Object.getOwnPropertyDescriptor(created.fields, "__proto__")).toMatchObject({
+          value: "integer",
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+        expect(created.fields["__proto__"]).toBe("integer");
+        expect(created.fields.status).toBe("string");
+
+        const loaded = await store.getCollection("orders");
+
+        if (loaded === null) {
+          throw new Error("expected the collection to be stored");
+        }
+
+        expect(Object.getPrototypeOf(loaded.fields)).toBe(Object.prototype);
+        expect(Object.getOwnPropertyDescriptor(loaded.fields, "__proto__")?.value).toBe("integer");
+
+        const data = ownRecord<JsonValue>([
+          ["status", "open"],
+          ["__proto__", 4],
+        ]);
+        const written = await put(store, loaded, "a", data);
+        const stored = await store.getRecord("orders", "a");
+
+        expect(Object.getPrototypeOf(written.record.data)).toBe(Object.prototype);
+        expect(Object.getOwnPropertyDescriptor(written.record.data, "__proto__")?.value).toBe(4);
+        expect(Object.getOwnPropertyDescriptor(stored?.data ?? {}, "__proto__")?.value).toBe(4);
+        expect(stored?.data.status).toBe("open");
+
+        const aliases = ownRecord([["__proto__", "status"]]);
+        const aliased = await store.createCollection("tickets", { status: "string" }, aliases);
+
+        if (aliased.aliases === undefined) {
+          throw new Error("expected the alias to be returned");
+        }
+
+        expect(Object.getPrototypeOf(aliased.aliases)).toBe(Object.prototype);
+        expect(Object.getOwnPropertyDescriptor(aliased.aliases, "__proto__")).toMatchObject({
+          value: "status",
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
+
+        const tickets = await store.getCollection("tickets");
+
+        if (tickets?.aliases === undefined) {
+          throw new Error("expected the alias to be stored");
+        }
+
+        expect(Object.getPrototypeOf(tickets.aliases)).toBe(Object.prototype);
+        expect(Object.getOwnPropertyDescriptor(tickets.aliases, "__proto__")?.value).toBe("status");
       });
 
       it("keeps a caller's later edits to fields and aliases off the stored collection", async () => {
@@ -229,6 +292,65 @@ export function runStoreContract(
         await expect(put(store, first, "a", { status: "open" })).rejects.toMatchObject(rejection("not_found"));
         expect(await store.getRecord("orders", "a")).toBeNull();
         expect(await store.getRecord("orders", "kept")).toEqual(kept.record);
+      });
+
+      it("rejects a NUL character in a document and does not write or store the key", async () => {
+        const orders = await collection(store, "orders", ORDER_FIELDS);
+
+        await expect(put(store, orders, "a", { status: "a\u0000b" })).rejects.toMatchObject({
+          ...rejection("invalid_argument"),
+          message: "String at $.status must not contain a NUL character.",
+        });
+        expect(await store.getRecord("orders", "a")).toBeNull();
+
+        const cases: readonly { data: JsonObject; message: string }[] = [
+          {
+            data: { status: "open", note: "a\u0000" },
+            message: "String at $.note must not contain a NUL character.",
+          },
+          {
+            data: { status: "open", extra: { note: "a\u0000" } },
+            message: "String at $.extra.note must not contain a NUL character.",
+          },
+          {
+            data: { status: "open", tags: ["ok", "a\u0000"] },
+            message: "String at $.tags[1] must not contain a NUL character.",
+          },
+          {
+            data: ownRecord<JsonValue>([
+              ["status", "open"],
+              ["a\u0000", 1],
+            ]),
+            message: "Object key at $ must not contain a NUL character.",
+          },
+          {
+            data: nestedNulKey(),
+            message: "Object key at $.extra must not contain a NUL character.",
+          },
+        ];
+
+        for (const entry of cases) {
+          await expect(
+            put(store, orders, "a", entry.data, {
+              idempotency: { key: "once", fingerprint: entry.message },
+            }),
+          ).rejects.toMatchObject({
+            ...rejection("invalid_argument"),
+            message: entry.message,
+          });
+          expect(await store.getRecord("orders", "a")).toBeNull();
+        }
+
+        const written = await put(
+          store,
+          orders,
+          "a",
+          { status: "open\n\u0001" },
+          { idempotency: { key: "once", fingerprint: "ok" } },
+        );
+
+        expect(written.record.data.status).toBe("open\n\u0001");
+        expect(await store.getRecord("orders", "a")).toEqual(written.record);
       });
     });
 
@@ -1009,6 +1131,34 @@ export function runStoreContract(
       });
     });
   });
+}
+
+function ownRecord<T>(entries: readonly (readonly [string, T])[]): Record<string, T> {
+  const record: Record<string, T> = {};
+
+  for (const [key, value] of entries) {
+    Object.defineProperty(record, key, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  return record;
+}
+
+function nestedNulKey(): JsonObject {
+  const extra: JsonObject = {};
+
+  Object.defineProperty(extra, "a\u0000", {
+    value: true,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+
+  return { status: "open", extra };
 }
 
 function rejection(code: ErrorCode): { code: ErrorCode; status: number } {

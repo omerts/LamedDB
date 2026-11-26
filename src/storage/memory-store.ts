@@ -7,7 +7,7 @@ import type {
   JsonObject,
   RecordEnvelope,
 } from "../types.js";
-import { parseMemoryStoreOptions } from "../validate.js";
+import { assertNoEmbeddedNul, parseMemoryStoreOptions } from "../validate.js";
 import type {
   CollectionState,
   IdempotentPut,
@@ -156,6 +156,8 @@ export class MemoryStore implements Store {
    * record update would let two puts with the same key both write.
    */
   private applyPut(input: PutRecordInput): PutRecordResult {
+    assertNoEmbeddedNul(input.data);
+
     const collection = this.collections.get(input.collection);
 
     if (!collection) {
@@ -429,7 +431,18 @@ function cloneFields(fields: FieldMap): FieldMap {
 }
 
 function cloneAliases(aliases: AliasMap): AliasMap {
-  return { ...aliases };
+  const copy: Record<string, string> = {};
+
+  for (const [name, target] of Object.entries(aliases)) {
+    Object.defineProperty(copy, name, {
+      value: target,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+
+  return copy;
 }
 
 /** The payload callers see. `aliases` appears only when the collection declared some. */

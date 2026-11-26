@@ -169,6 +169,33 @@ if (testDatabaseUrl === undefined) {
   });
 
   describe("PostgresStore durability and change log", () => {
+    it("creates an idempotent index for idempotency retention order", async () => {
+      const schema = `i_${randomBytes(8).toString("hex")}`;
+
+      schemas.push(schema);
+
+      const store = new PostgresStore(contractStoreOptions(databaseUrl, schema, pool, undefined));
+
+      try {
+        await store.migrate();
+        await store.migrate();
+
+        const indexes = await pool.query<{ indexdef: string }>(
+          `SELECT indexdef
+           FROM pg_indexes
+           WHERE schemaname = $1
+             AND tablename = 'idempotency'
+             AND indexname = 'idempotency_stored_at_seq'`,
+          [schema],
+        );
+
+        expect(indexes.rows).toHaveLength(1);
+        expect(indexes.rows[0]?.indexdef).toContain("(collection, stored_at, seq)");
+      } finally {
+        await store.close();
+      }
+    });
+
     it("keeps records after the store is closed and migrate runs twice", async () => {
       const schema = `d_${randomBytes(8).toString("hex")}`;
 

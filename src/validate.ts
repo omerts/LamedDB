@@ -592,6 +592,8 @@ function copyJsonObject(input: Record<string, unknown>, path: string, depth: num
   const copy: JsonObject = {};
 
   for (const name of names) {
+    rejectEmbeddedNul(name, "key", path);
+
     defineOwn(copy, name, copyJsonValue(input[name], joinPath(path, name), depth + 1));
   }
 
@@ -608,6 +610,8 @@ function copyJsonValue(value: unknown, path: string, depth: number): JsonValue {
   }
 
   if (typeof value === "string") {
+    rejectEmbeddedNul(value, "string", path);
+
     if (Buffer.byteLength(value, "utf8") > LIMITS.maxStringBytes) {
       throw new LamedError(
         "invalid_argument",
@@ -646,6 +650,72 @@ function copyJsonValue(value: unknown, path: string, depth: number): JsonValue {
   }
 
   throw new LamedError("invalid_argument", `Value at ${path} is not valid JSON.`);
+}
+
+/**
+ * Reject U+0000 in JSON strings and object keys.
+ * PostgreSQL jsonb cannot store that character, and a database error would surface as HTTP 500.
+ * Both stores reject it so a direct put fails the same way as `validateDocument`.
+ */
+export function assertNoEmbeddedNul(value: JsonValue): void {
+  walkJson(value, "$", new Set());
+}
+
+function walkJson(value: JsonValue, path: string, seen: Set<object>): void {
+  if (typeof value === "string") {
+    rejectEmbeddedNul(value, "string", path);
+
+    return;
+  }
+
+  if (value === null || typeof value !== "object") {
+    return;
+  }
+
+  if (seen.has(value)) {
+    return;
+  }
+
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const item = value[index];
+
+      if (item !== undefined) {
+        walkJson(item, `${path}[${index}]`, seen);
+      }
+    }
+
+    return;
+  }
+
+  if (!isPlainObject(value)) {
+    return;
+  }
+
+  for (const key of Object.keys(value)) {
+    rejectEmbeddedNul(key, "key", path);
+
+    const child = value[key];
+
+    if (child !== undefined) {
+      walkJson(child, joinPath(path, key), seen);
+    }
+  }
+}
+
+function rejectEmbeddedNul(text: string, kind: "string" | "key", path: string): void {
+  if (!text.includes("\u0000")) {
+    return;
+  }
+
+  const message =
+    kind === "key"
+      ? `Object key at ${path} must not contain a NUL character.`
+      : `String at ${path} must not contain a NUL character.`;
+
+  throw new LamedError("invalid_argument", message);
 }
 
 function assertFieldValue(name: string, type: FieldType, value: JsonValue | undefined): void {
