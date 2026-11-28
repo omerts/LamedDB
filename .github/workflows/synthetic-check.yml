@@ -1,0 +1,86 @@
+name: Synthetic check
+
+# Scheduled check of a running LamedDB. There is no long-lived hosted deployment
+# yet, so the target is an ephemeral NONPRODUCTION staging instance: the compiled
+# server (npm run build, npm start) started fresh on the runner with the
+# PostgreSQL store. The check is a real round trip, not just /health.
+# A failed scheduled run is reported by GitHub Actions to the repository owner.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      expect_status:
+        description: "Value the check expects to find. Leave empty for the real check. Anything else is a controlled failure."
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - scripts/synthetic-check.mjs
+      - .github/workflows/synthetic-check.yml
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      LAMEDDB_URL: http://127.0.0.1:18080
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: lamed
+          POSTGRES_PASSWORD: lamed
+          POSTGRES_DB: lamed
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lamed -d lamed"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Start the staging instance
+        run: |
+          key="$(openssl rand -hex 16)"
+          echo "::add-mask::$key"
+          echo "LAMEDDB_API_KEY=$key" >> "$GITHUB_ENV"
+          LAMEDDB_API_KEYS="$key" \
+          LAMEDDB_DATABASE_URL=postgres://lamed:lamed@127.0.0.1:5432/lamed \
+          PORT=18080 \
+          nohup npm start > server.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS "$LAMEDDB_URL/health" > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "The staging instance did not become healthy" >&2
+          cat server.log >&2
+          exit 1
+
+      - name: Run the synthetic check
+        env:
+          EXPECT_STATUS: ${{ github.event.inputs.expect_status }}
+        run: |
+          if [ -n "$EXPECT_STATUS" ]; then
+            export LAMEDDB_CHECK_EXPECT_STATUS="$EXPECT_STATUS"
+          fi
+          node scripts/synthetic-check.mjs

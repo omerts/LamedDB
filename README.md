@@ -184,6 +184,12 @@ Filterable fields are the declared fields, their aliases, and `id`. Values are r
 
 **Errors.** `401` without a key (checked first), `404` for a missing collection, `405` with `Allow: GET` for other methods (after the key check, whatever else the request carries), `400` for a bad `limit`, `cursor`, `sort`, or filter, or for a body, `If-Match`, `If-None-Match`, or `Idempotency-Key`. This is the only route that accepts query parameters, and only `limit`, `cursor`, `sort`, and `filter[...]`.
 
+## Synthetic check
+
+`scripts/synthetic-check.mjs` checks a running server with a real round trip: `GET /health`, then create a temporary collection, put two records, find the expected one with a filtered list (a filter for any other status returns nothing), read it back, and delete the collection. Deletion runs only after this check created the collection, including when a later assertion fails, and any cleanup response other than `204` fails the check. Run it with `LAMEDDB_URL=http://127.0.0.1:8080 LAMEDDB_API_KEY=dev-key node scripts/synthetic-check.mjs`. It exits `0` on a pass, `1` on a failed assertion or request, and `2` when a variable is missing. Set `LAMEDDB_CHECK_EXPECT_STATUS` to a value the check does not write to force a failure.
+
+The `Synthetic check` workflow runs it every six hours against an ephemeral nonproduction staging instance (the built server on the runner, with PostgreSQL). Run it by hand from the Actions tab with `expect_status` set to a value such as `refunded` to test the failure alert.
+
 ## MCP tool
 
 `lameddb-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server with one read-only tool, `query_records`. It wraps `GET /v1/collections/{name}/records`, so an agent can page through records with filters and sort.
